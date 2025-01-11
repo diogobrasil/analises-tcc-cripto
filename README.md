@@ -31,5 +31,5 @@ Autores:
 
 E-mail: 
   - diogobrasildasilva@gmail.com
-  - emanuel.silva@discente.ufma.br
+  - emanuel.silva@discente.ufma.br//emanuelsilva.slz@gmail.com
   - mathii10costa@gmail.com  
