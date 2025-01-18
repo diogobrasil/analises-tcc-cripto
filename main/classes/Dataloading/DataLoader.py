@@ -23,7 +23,7 @@ class DataLoader:
             file_path = os.path.join(folder_path, file_name)
             if file_name.endswith('.csv'):
                 data = pd.read_csv(file_path)
-                data['crypto_name'] = os.path.splitext(file_name)[0]  # Add crypto name from file name
+                data['B3'] = os.path.splitext(file_name)[0]  
                 all_data.append(data)
                 print(f"Data loaded for file: {file_name}")
         
@@ -33,7 +33,7 @@ class DataLoader:
 if __name__ == "__main__":
     # Example usage
 
-    base_path = "../../datasets/b3_dados"
+    base_path = "../../datasets/b3_dados/"
 
     # Assuming data is manually placed in the dataset folder
     raw = os.path.join(base_path, "raw")
@@ -43,5 +43,5 @@ if __name__ == "__main__":
     print(single_crypto_data.head())
 
     # Load multiple cryptos data from the folder
-    all_cryptos_data = DataLoader.load_multiple_cryptos(raw)
-    print(all_cryptos_data.head())
+    # all_cryptos_data = DataLoader.load_multiple_cryptos(raw)
+    # print(all_cryptos_data.head())
