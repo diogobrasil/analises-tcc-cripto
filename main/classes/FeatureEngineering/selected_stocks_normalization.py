@@ -22,36 +22,49 @@ if not file_path.exists():
 # 6. Load the data
 stocks_data = pd.read_csv(file_path)
 
-# 7. Filter for the selected stocks
-selected_stocks = ["VALE3", "BRAP3", "BBAS3", "ITUB4", "ELET3", "EQTL3"]
+# 7. Ensure the date column exists and sort by date
+if 'Date' not in stocks_data.columns:
+    raise KeyError("The input data does not contain a 'Date' column.")
+stocks_data['Date'] = pd.to_datetime(stocks_data['Date'])  # Ensure the date is in datetime format
+stocks_data = stocks_data.sort_values(by='Date')  # Sort by date
+
+# 8. Filter for the selected stocks along with the Date column
+selected_stocks = ["Date", "VALE3", "BRAP3", "BBAS3", "ITUB4", "ELET3", "EQTL3"]
 filtered_data = stocks_data[selected_stocks]
 
-# 8. Apply Min-Max Normalization
+# 9. Save the Date column for later use
+dates = filtered_data['Date']
+
+# 10. Drop the Date column before normalization
+data_to_normalize = filtered_data.drop(columns=['Date'])
+
+# 11. Apply Min-Max Normalization
 min_max_scaler = MinMaxScaler()
-min_max_normalized = pd.DataFrame(min_max_scaler.fit_transform(filtered_data), columns=selected_stocks)
+min_max_normalized = pd.DataFrame(min_max_scaler.fit_transform(data_to_normalize), columns=data_to_normalize.columns)
 
-# 9. Apply Z-Score Normalization
+# 12. Apply Z-Score Normalization
 z_score_scaler = StandardScaler()
-z_score_normalized = pd.DataFrame(z_score_scaler.fit_transform(filtered_data), columns=selected_stocks)
+z_score_normalized = pd.DataFrame(z_score_scaler.fit_transform(data_to_normalize), columns=data_to_normalize.columns)
 
-# 10. Apply Robust Scaler Normalization
+# 13. Apply Robust Scaler Normalization
 robust_scaler = RobustScaler()
-robust_normalized = pd.DataFrame(robust_scaler.fit_transform(filtered_data), columns=selected_stocks)
+robust_normalized = pd.DataFrame(robust_scaler.fit_transform(data_to_normalize), columns=data_to_normalize.columns)
 
-# 11. Combine all normalized data for comparison
+# 14. Combine all normalized data for comparison and re-add the Date column
 normalized_data = pd.concat([
+    dates.reset_index(drop=True),
     min_max_normalized.add_suffix('_min_max'),
     z_score_normalized.add_suffix('_z_score'),
     robust_normalized.add_suffix('_robust')
 ], axis=1)
 
-# 12. Path to save the output file
+# 15. Path to save the output file
 output_path = base_path / "selected_stocks_normalized.csv"
 
-# 13. Create the output directory if it doesn't exist
+# 16. Create the output directory if it doesn't exist
 output_path.parent.mkdir(parents=True, exist_ok=True)
 
-# 14. Save the normalized data to a CSV file
+# 17. Save the normalized data to a CSV file
 normalized_data.to_csv(output_path, index=False)
 
-print(f"Normalized data saved to: {output_path}")
+print(f"Normalized data with date saved to: {output_path}")
