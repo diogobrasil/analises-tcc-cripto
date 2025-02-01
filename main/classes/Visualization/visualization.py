@@ -29,18 +29,24 @@ class Visualization:
         plt.show()
 
     def plot_bollinger_bands(self, stock, window=20, start_date=None, end_date=None):
-        self.data['Date'] = pd.to_datetime(self.data['Date'])
-        self.data.set_index('Date', inplace=True)
-        self.data['SMA'] = self.data[stock].rolling(window=window).mean()
-        self.data['Banda Superior'] = self.data['SMA'] + (2 * self.data[stock].rolling(window=window).std())
-        self.data['Banda Inferior'] = self.data['SMA'] - (2 * self.data[stock].rolling(window=window).std())
-        filtered_df = self.data.loc[start_date:end_date]
+        data_frame = self.data.copy()
+        data_frame['Date'] = pd.to_datetime(data_frame['Date'])
+        
+        data_frame['SMA'] = data_frame[stock].rolling(window=window).mean()
+        data_frame['Banda Superior'] = data_frame['SMA'] + (2 * data_frame[stock].rolling(window=window).std())
+        data_frame['Banda Inferior'] = data_frame['SMA'] - (2 * data_frame[stock].rolling(window=window).std())
+        
+        if start_date and end_date:
+            filtered_df = data_frame[(data_frame['Date'] >= start_date) & (data_frame['Date'] <= end_date)]
+        else:
+            filtered_df = data_frame
+        
         plt.figure(figsize=(12, 6))
-        plt.plot(filtered_df.index, filtered_df[stock], label=stock, color='blue', alpha=0.5)
-        plt.plot(filtered_df.index, filtered_df['SMA'], label='Média Móvel (SMA)', color='orange', linestyle='--')
-        plt.plot(filtered_df.index, filtered_df['Banda Superior'], label='Banda Superior', color='green', linestyle='--')
-        plt.plot(filtered_df.index, filtered_df['Banda Inferior'], label='Banda Inferior', color='red', linestyle='--')
-        plt.fill_between(filtered_df.index, filtered_df['Banda Superior'], filtered_df['Banda Inferior'], color='gray', alpha=0.2)
+        plt.plot(filtered_df['Date'], filtered_df[stock], label=stock, color='blue', alpha=0.5)
+        plt.plot(filtered_df['Date'], filtered_df['SMA'], label='Média Móvel (SMA)', color='orange', linestyle='--')
+        plt.plot(filtered_df['Date'], filtered_df['Banda Superior'], label='Banda Superior', color='green', linestyle='--')
+        plt.plot(filtered_df['Date'], filtered_df['Banda Inferior'], label='Banda Inferior', color='red', linestyle='--')
+        plt.fill_between(filtered_df['Date'], filtered_df['Banda Superior'], filtered_df['Banda Inferior'], color='gray', alpha=0.2)
         plt.title(f'Bandas de Bollinger - {stock} (Período Filtrado)')
         plt.xlabel('Data')
         plt.ylabel('Preço')
@@ -49,12 +55,16 @@ class Visualization:
         plt.show()
 
     def plot_returns(self, stock, start_date=None, end_date=None):
-        self.data['Date'] = pd.to_datetime(self.data['Date'])
-        filtered_data = self.data.copy()
+        data_frame = self.data.copy()
+        data_frame['Date'] = pd.to_datetime(data_frame['Date'])
+        
         if start_date and end_date:
-            filtered_data = filtered_data[(filtered_data['Date'] >= start_date) & 
-                                          (filtered_data['Date'] <= end_date)]
-        filtered_data['Returns'] = filtered_data[stock].pct_change() * 100
+            filtered_data = data_frame[(data_frame['Date'] >= start_date) & 
+                                       (data_frame['Date'] <= end_date)].copy()
+        else:
+            filtered_data = data_frame.copy()
+        
+        filtered_data.loc[:, 'Returns'] = filtered_data[stock].pct_change() * 100
         plt.figure(figsize=(12, 6))
         plt.plot(filtered_data['Date'], filtered_data['Returns'], label=f'{stock} Returns')
         plt.axhline(0, color='red', linestyle='--', linewidth=0.8)
