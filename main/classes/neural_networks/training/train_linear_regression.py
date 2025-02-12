@@ -45,30 +45,43 @@ def load_data(csv_path: str) -> pd.DataFrame:
 def main(args):
     # Carrega o dataset
     df = load_data(args.csv_path)
-    if args.target not in df.columns:
+    
+    # Se houver coluna 'Date', ordena os dados
+    if "Date" in df.columns:
+        df.sort_values("Date", inplace=True)
+    
+    # Monta o sufixo de normalização (ex.: "_min_max")
+    norm_suffix = "_" + args.normalization.strip().lower()
+    
+    # Define a coluna alvo com base no argumento target + o sufixo da normalização
+    target_col = args.target + norm_suffix
+    
+    if target_col not in df.columns:
         available_cols = list(df.columns)
-        print(f"Coluna alvo '{args.target}' não encontrada. Colunas disponíveis: {available_cols}")
+        print(f"Coluna alvo '{target_col}' não encontrada. Colunas disponíveis: {available_cols}")
         return
 
     # Cria os dados com janela
-    X, y = create_window_data(df, args.target, args.window)
+    X, y = create_window_data(df, target=target_col, window_size=args.window)
     
     # Instancia e treina o modelo usando a equação normal
     model = LinearRegression()
     theta = model.normal_equation(X, y)
     predictions = model.predict(X)
     
-    print("Parâmetros:", theta)
+    print("Parâmetros (theta):", theta)
     print("Previsões:", predictions)
     
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Treinamento de regressão linear com janela para ações")
-    parser.add_argument('--csv_path', type=str, default="main/datasets/b3_dados/processed/acoes_concat.csv",
-                        help="Caminho para o arquivo CSV com os dados")
+    parser = argparse.ArgumentParser(description="Treinamento de regressão linear com janela usando dados normalizados")
+    parser.add_argument('--csv_path', type=str, default="main/datasets/b3_dados/processed/selected_stocks_normalized.csv",
+                        help="Caminho para o arquivo CSV com TODAS as ações normalizadas.")
     parser.add_argument('--target', type=str, default="ITUB4",
-                        help="Coluna alvo (nome da ação) para previsão")
+                        help="Nome base da ação alvo para previsão (ex.: ITUB4).")
+    parser.add_argument('--normalization', type=str, default="min_max",
+                        help="Tipo de normalização a usar: 'min_max', 'z_score' ou 'robust'.")
     parser.add_argument('--window', type=int, default=3,
-                        help="Tamanho da janela (número de lags) a ser considerado")
+                        help="Tamanho da janela (número de lags) a ser considerado.")
     
     args = parser.parse_args()
     main(args)

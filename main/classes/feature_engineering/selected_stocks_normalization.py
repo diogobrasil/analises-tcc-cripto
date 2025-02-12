@@ -29,7 +29,8 @@ stocks_data['Date'] = pd.to_datetime(stocks_data['Date'])  # Ensure the date is 
 stocks_data = stocks_data.sort_values(by='Date')  # Sort by date
 
 # 8. Filter for the selected stocks along with the Date column
-selected_stocks = ["Date", "VALE3", "BRAP3", "BBAS3", "ITUB4", "ELET3", "EQTL3"]
+selected_stocks = ["Date", "ITUB4", "BBAS3", "CYRE3", "TEND3", "DIRR3", "ELET3", "EQTL3", "CMIG4", "PETR3", "VALE3", "BRAP3"]
+
 filtered_data = stocks_data[selected_stocks]
 
 # 9. Save the Date column for later use
