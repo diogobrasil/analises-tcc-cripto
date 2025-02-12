@@ -3,11 +3,14 @@
 Este repositório contém análises de dados realizadas como parte do desenvolvimento do TCC. Aqui, exploramos dados históricos de criptomoedas e realizamos testes preliminares para entender padrões e preparar o conjunto de dados para futuras modelagens.
 
 ## Conteúdo
-- `data/`: Dados históricos de preços e volumes de criptomoedas.
-  - `raw/`: Dados originais (sem tratamento).
-  - `processed/`: Dados tratados e prontos para análise.
-- `notebooks/`: Notebooks com análises exploratórias, pré-processamento e visualizações.
+- `main/`:Pasta principal.
+  - `dataset/`: Dados históricos de preços e volumes de criptomoedas.
+    - `raw/`: Dados originais (sem tratamento).
+    - `processed/`: Dados tratados e prontos para análise.
+    - `scripts/`:Scripts para carregamento e tratamento dos dados.
+  - `notebooks/`: Notebooks com análises exploratórias, pré-processamento e visualizações.
 - `figures/`: Gráficos gerados durante as análises.
+- `Documentação/`:Documentos realcionados ao projeto.
 - `README.md`: Descrição do repositório.
 
 ## Tecnologias Utilizadas
