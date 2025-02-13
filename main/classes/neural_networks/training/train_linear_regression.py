@@ -1,13 +1,9 @@
 import pandas as pd
 import numpy as np
 import argparse
-import os
-import sys
 
-# Adiciona o caminho da pasta `main` ao sys.path
-sys.path.append(os.path.abspath("../"))
 
-from neural_networks.architectures.linear_regression import LinearRegression
+from classes.neural_networks.architectures.linear_regression import LinearRegression
 
 def create_window_data(df: pd.DataFrame, target: str, window_size: int = 3):
     """

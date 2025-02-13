@@ -1,0 +1,18 @@
+README.md
+setup.py
+main/classes/__init__.py
+main/classes/data_loading/DataLoader.py
+main/classes/data_loading/__init__.py
+main/classes/feature_engineering/Feature Engineering.py
+main/classes/feature_engineering/__init__.py
+main/classes/feature_engineering/selected_stocks_normalization.py
+main/classes/neural_networks/__init__.py
+main/classes/neural_networks/architectures/__init__.py
+main/classes/neural_networks/architectures/base_model.py
+main/classes/neural_networks/architectures/linear_regression.py
+main/classes/visualization/__init__.py
+main/classes/visualization/visualization.py
+main/tcc_cripto.egg-info/PKG-INFO
+main/tcc_cripto.egg-info/SOURCES.txt
+main/tcc_cripto.egg-info/dependency_links.txt
+main/tcc_cripto.egg-info/top_level.txt
