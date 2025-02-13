@@ -11,7 +11,7 @@ st.set_page_config(page_title="Home", page_icon="📊", layout="wide")
 
 # Carregar o DataFrame com todas as ações
 if "df_acoes" not in st.session_state:
-    df_acoes = pd.read_csv("../datasets/b3_dados/processed/selected_stocks.csv")
+    df_acoes = pd.read_csv("../datasets/b3_dados/processed/acoes_concat.csv")
     df_acoes["Date"] = pd.to_datetime(df_acoes["Date"])
     df_acoes.set_index("Date", inplace=True)
     st.session_state["df_acoes"] = df_acoes  # Salvar no session_state
