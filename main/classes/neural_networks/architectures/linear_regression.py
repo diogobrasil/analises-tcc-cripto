@@ -14,9 +14,14 @@ class LinearRegression:
         Returns:
             theta: Vetor de parâmetros (m+1,)
         """
+        if X.shape[0] != y.shape[0]:
+            raise ValueError("O número de amostras em X e y deve ser igual.")
+        
         # Adiciona a coluna de 1's para o bias
         X_b = np.c_[np.ones((X.shape[0], 1)), X]
-        self.theta = np.linalg.inv(X_b.T.dot(X_b)).dot(X_b.T).dot(y)
+        
+        # Usa a pseudoinversa para maior estabilidade numérica
+        self.theta = np.linalg.pinv(X_b.T.dot(X_b)).dot(X_b.T).dot(y)
         return self.theta
 
     def predict(self, X: np.ndarray):
@@ -28,5 +33,8 @@ class LinearRegression:
         Returns:
             Predições: Vetor de previsões
         """
+        if self.theta is None:
+            raise ValueError("O modelo não foi treinado. Execute `normal_equation` primeiro.")
+        
         X_b = np.c_[np.ones((X.shape[0], 1)), X]
         return X_b.dot(self.theta)
