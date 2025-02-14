@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-
 
 from classes.neural_networks.architectures.linear_regression import LinearRegression
 
@@ -23,6 +23,18 @@ def split_data(X: np.ndarray, y: np.ndarray, test_size: float = 0.2):
     y_train, y_test = y[:split_index], y[split_index:]
     return X_train, X_test, y_train, y_test
 
+def normalize_data(X_train, X_test, y_train, y_test):
+    scaler_X = MinMaxScaler()
+    scaler_y = MinMaxScaler()
+
+    X_train_norm = scaler_X.fit_transform(X_train)
+    X_test_norm = scaler_X.transform(X_test)
+
+    y_train_norm = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
+    y_test_norm = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
+
+    return X_train_norm, X_test_norm, y_train_norm, y_test_norm, scaler_y
+
 def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray):
     mse = mean_squared_error(y_true, y_pred)
     rmse = np.sqrt(mse)
@@ -36,27 +48,31 @@ def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray):
         'R2': r2
     }
 
-def train_and_evaluate(csv_path: str, target: str, normalization: str, window: int):
+def train_and_evaluate(csv_path: str, target: str, window: int):
     df = load_data(csv_path)
     
     if "Date" in df.columns:
         df.sort_values("Date", inplace=True)
-    
-    norm_suffix = "_" + normalization.strip().lower()
-    target_col = target + norm_suffix
-    
-    if target_col not in df.columns:
+        print(df)
+    if target not in df.columns:
         available_cols = list(df.columns)
-        raise ValueError(f"Coluna alvo '{target_col}' não encontrada. Colunas disponíveis: {available_cols}")
+        raise ValueError(f"Coluna alvo '{target}' não encontrada. Colunas disponíveis: {available_cols}")
 
-    X, y = create_window_data(df, target=target_col, window_size=window)
+    X, y = create_window_data(df, target=target, window_size=window)
     X_train, X_test, y_train, y_test = split_data(X, y)
     
-    model = LinearRegression()
-    theta = model.normal_equation(X_train, y_train)
+    # Aplica normalização após o split
+    X_train_norm, X_test_norm, y_train_norm, y_test_norm, scaler_y = normalize_data(X_train, X_test, y_train, y_test)
     
-    train_predictions = model.predict(X_train)
-    test_predictions = model.predict(X_test)
+    model = LinearRegression()
+    theta = model.normal_equation(X_train_norm, y_train_norm)
+    
+    train_predictions = model.predict(X_train_norm)
+    test_predictions = model.predict(X_test_norm)
+    
+    # Desnormaliza as previsões para calcular métricas na escala original
+    train_predictions = scaler_y.inverse_transform(train_predictions.reshape(-1, 1)).ravel()
+    test_predictions = scaler_y.inverse_transform(test_predictions.reshape(-1, 1)).ravel()
     
     train_metrics = evaluate_model(y_train, train_predictions)
     test_metrics = evaluate_model(y_test, test_predictions)
@@ -74,14 +90,12 @@ def train_and_evaluate(csv_path: str, target: str, normalization: str, window: i
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Treinamento de regressão linear com janela usando dados normalizados")
-    parser.add_argument('--csv_path', type=str, default="main/datasets/b3_dados/processed/selected_stocks_normalized.csv",
-                        help="Caminho para o arquivo CSV com TODAS as ações normalizadas.")
-    parser.add_argument('--target', type=str, default="ITUB4",
+    parser.add_argument('--csv_path', type=str, default="main/datasets/b3_dados/processed/acoes_concat.csv",
+                        help="Caminho para o arquivo CSV com os dados originais das ações.")
+    parser.add_argument('--target', type=str, default="VALE3",
                         help="Nome base da ação alvo para previsão (ex.: ITUB4).")
-    parser.add_argument('--normalization', type=str, default="min_max",
-                        help="Tipo de normalização a usar: 'min_max', 'z_score' ou 'robust'.")
     parser.add_argument('--window', type=int, default=3,
                         help="Tamanho da janela (número de lags) a ser considerado.")
     
     args = parser.parse_args()
-    train_and_evaluate(args.csv_path, args.target, args.normalization, args.window)
+    train_and_evaluate(args.csv_path, args.target, args.window)
