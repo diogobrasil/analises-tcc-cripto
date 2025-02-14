@@ -18,7 +18,7 @@ if "df_acoes" not in st.session_state:
 
 # Carregar o DataFrame com todas as ações normalizadas
 if "df_acoes_norm" not in st.session_state:
-    path_norm = "../datasets/b3_dados/processed/selected_stocks_normalized.csv"
+    path_norm = "../datasets/b3_dados/processed/acoes_concat.csv"
     st.session_state["df_acoes_norm"] = path_norm  # Salvar no session_state
 
 st.write("# DADOS DE AÇÕES NEGOCIADAS NA B3 ENTRE 2010 E 2022 📈")
