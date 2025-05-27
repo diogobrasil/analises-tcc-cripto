@@ -134,6 +134,12 @@ def train_and_evaluate(csv_path: str, target: str, window: int, model_dir: str, 
             'test_metrics': test_metrics
         }, f)
     logging.info(f"Métricas para {target} salvas em {metrics_path}")
+
+    # Salvar y_test, test_predictions e X_test_norm para análise de hipóteses
+    np.save(os.path.join(model_dir, f"{target}_y_test_v{version}.npy"), y_test)
+    np.save(os.path.join(model_dir, f"{target}_y_pred_v{version}.npy"), test_predictions)
+    np.save(os.path.join(model_dir, f"{target}_X_test_norm_v{version}.npy"), X_test_norm)
+    logging.info(f"Arquivos para análise de hipóteses salvos para {target}")
     
     return model, theta, train_metrics, val_metrics, test_metrics, y_test, test_predictions
 
