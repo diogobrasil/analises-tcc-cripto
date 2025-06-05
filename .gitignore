@@ -1,1 +1,5 @@
 env/
+# Ignorar arquivos de bytecode Python
+__pycache__/
+*.py[cod]
+*$py.class
