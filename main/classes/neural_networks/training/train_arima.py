@@ -17,7 +17,7 @@ def load_data(csv_path: str) -> pd.DataFrame:
     df.index.freq = pd.tseries.offsets.BDay()  # Força a frequência
     return df
 
-def split_data(df: pd.DataFrame, target: str, split_date: str = "2021-01-01"):
+def split_data(df: pd.DataFrame, target: str, split_date: str = "2019-01-01"):
     y = df[target].dropna()
     train = y[y.index < split_date]
     test = y[y.index >= split_date]
@@ -37,7 +37,7 @@ def evaluate_model(y_true, y_pred):
     r2 = r2_score(y_true, y_pred)
     return {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'R2': r2}
 
-def train_and_evaluate_arima(csv_path, target, order, model_dir, version):
+def train_and_evaluate_arima(csv_path, target, order, model_dir, version, split_date="2019-01-01"):
     logging.info(f"Carregando dados para {target}")
     df = load_data(csv_path)
 
@@ -45,7 +45,7 @@ def train_and_evaluate_arima(csv_path, target, order, model_dir, version):
         available_cols = list(df.columns)
         raise ValueError(f"Coluna alvo '{target}' não encontrada. Colunas disponíveis: {available_cols}")
 
-    train, test = split_data(df, target)
+    train, test = split_data(df, target, split_date)
     logging.info(f"Tamanho do treino: {len(train)} | Tamanho do teste: {len(test)}")
     
     if len(train) == 0 or len(test) == 0:
@@ -82,7 +82,6 @@ def train_and_evaluate_arima(csv_path, target, order, model_dir, version):
     np.save(os.path.join(model_dir, f"{target}_arima_rolling_y_pred_v{version}.npy"), predictions)
 
     logging.info(f"Modelo, métricas e previsões salvos em {model_dir}")
-    
     return arima, metrics, predictions
 
 if __name__ == '__main__':
