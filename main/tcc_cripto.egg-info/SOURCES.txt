@@ -8,6 +8,7 @@ main/classes/feature_engineering/__init__.py
 main/classes/feature_engineering/selected_stocks_normalization.py
 main/classes/neural_networks/__init__.py
 main/classes/neural_networks/architectures/__init__.py
+main/classes/neural_networks/architectures/arima_model.py
 main/classes/neural_networks/architectures/base_model.py
 main/classes/neural_networks/architectures/linear_regression.py
 main/classes/visualization/__init__.py

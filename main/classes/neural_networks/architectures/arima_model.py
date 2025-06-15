@@ -23,4 +23,4 @@ class ArimaModel:
     def update(self, new_value):
         if self.model_fit is None:
             raise ValueError("O modelo ARIMA não foi ajustado. Execute `fit` primeiro.")
-        self.model_fit = self.model_fit.append(new_value, refit=False)
+        self.model_fit = self.model_fit.extend(new_value, refit=False)
