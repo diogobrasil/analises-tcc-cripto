@@ -47,25 +47,35 @@ class ActionPredictionTrading:
         self.df = self.df.iloc[self.window:].copy()
         self.df['predicted'] = y_pred
 
-    def simulate_trading(self, stop_loss=False, initial_capital=100000, shares_per_trade=100):
+    def simulate_trading(self, stop_loss=False, initial_capital=100000, shares_per_trade=100, stop_type='percent', stop_value=0.02):
         capital = initial_capital
         capital_history = [capital]
         hits = 0
         total_trades = 0
         profits = []
+        stop_triggered = 0
+        limits = []
 
         for i in range(len(self.df) - 1):
             price_today = self.df.iloc[i]['actual']
             price_tomorrow = self.df.iloc[i + 1]['actual']
             prediction = self.df.iloc[i]['predicted']
 
+            # Define stop limit
+            if stop_type == 'percent':
+                limit = stop_value * price_today  # ex: 2% do preço
+            elif stop_type == 'fixed':
+                limit = stop_value  # ex: R$ 0.50
+            else:
+                raise ValueError("Invalid stop_type. Use 'percent' or 'fixed'.")
+
             if prediction > price_today:
                 # Buy signal
                 profit = (price_tomorrow - price_today) * shares_per_trade
-                limit = 0.5 * abs(prediction - price_today)
                 if stop_loss and abs(price_tomorrow - price_today) > limit:
                     profit = -limit * shares_per_trade if price_tomorrow < price_today else profit
-
+                    stop_triggered += 1
+                    
                 capital += profit
                 profits.append(profit)
                 capital_history.append(capital)
@@ -76,9 +86,9 @@ class ActionPredictionTrading:
             elif prediction < price_today:
                 # Sell signal (short)
                 profit = (price_today - price_tomorrow) * shares_per_trade
-                limit = 0.5 * abs(prediction - price_today)
                 if stop_loss and abs(price_tomorrow - price_today) > limit:
                     profit = -limit * shares_per_trade if price_tomorrow > price_today else profit
+                    stop_triggered += 1
 
                 capital += profit
                 profits.append(profit)
@@ -99,5 +109,7 @@ class ActionPredictionTrading:
             'hit_rate': hit_rate,
             'sharpe_ratio': sharpe_ratio,
             'max_drawdown': max_drawdown,
-            'final_capital': capital
+            'final_capital': capital,
+            'stop_triggered': stop_triggered,
+            'limits': limits,
         }
