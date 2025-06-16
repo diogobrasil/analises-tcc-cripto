@@ -63,46 +63,62 @@ class ActionPredictionTrading:
 
             # Define stop limit
             if stop_type == 'percent':
-                limit = stop_value * price_today  # ex: 2% do preço
+                limit = stop_value * price_today  # valor absoluto baseado na porcentagem
             elif stop_type == 'fixed':
-                limit = stop_value  # ex: R$ 0.50
+                limit = stop_value  # valor fixo
             else:
                 raise ValueError("Invalid stop_type. Use 'percent' or 'fixed'.")
+            
+            limits.append(limit)  # Armazena o limite usado
 
             if prediction > price_today:
-                # Buy signal
-                profit = (price_tomorrow - price_today) * shares_per_trade
-                if stop_loss and abs(price_tomorrow - price_today) > limit:
-                    profit = -limit * shares_per_trade if price_tomorrow < price_today else profit
+                # Buy signal (posição longa)
+                price_change = price_tomorrow - price_today
+                profit = price_change * shares_per_trade
+                
+                # Aplica stop loss apenas se houver perda E ela exceder o limite
+                if stop_loss and price_change < 0 and abs(price_change) > limit:
+                    profit = -limit * shares_per_trade
                     stop_triggered += 1
                     
                 capital += profit
                 profits.append(profit)
-                capital_history.append(capital)
                 total_trades += 1
+                
+                # Hit apenas se previsão estava correta (preço subiu)
                 if price_tomorrow > price_today:
                     hits += 1
 
             elif prediction < price_today:
-                # Sell signal (short)
-                profit = (price_today - price_tomorrow) * shares_per_trade
-                if stop_loss and abs(price_tomorrow - price_today) > limit:
-                    profit = -limit * shares_per_trade if price_tomorrow > price_today else profit
+                # Sell signal (posição curta)
+                price_change = price_today - price_tomorrow  # lucro quando preço cai
+                profit = price_change * shares_per_trade
+                
+                # Aplica stop loss apenas se houver perda E ela exceder o limite
+                if stop_loss and price_change < 0 and abs(price_change) > limit:
+                    profit = -limit * shares_per_trade
                     stop_triggered += 1
 
                 capital += profit
                 profits.append(profit)
-                capital_history.append(capital)
                 total_trades += 1
+                
+                # Hit apenas se previsão estava correta (preço caiu)
                 if price_tomorrow < price_today:
                     hits += 1
-            else:
-                capital_history.append(capital)
+            
+            # Adiciona capital atual ao histórico
+            capital_history.append(capital)
 
-        hit_rate = hits / total_trades if total_trades else 0
+        # Métricas finais
+        hit_rate = hits / total_trades if total_trades > 0 else 0
         total_return = (capital - initial_capital) / initial_capital
-        sharpe_ratio = np.mean(profits) / np.std(profits) if np.std(profits) != 0 else 0
-        max_drawdown = max(np.maximum.accumulate(capital_history) - capital_history)
+        sharpe_ratio = np.mean(profits) / np.std(profits) if len(profits) > 0 and np.std(profits) != 0 else 0
+        
+        # Cálculo correto do max drawdown
+        peak = np.maximum.accumulate(capital_history)
+        drawdown = (peak - capital_history) / peak
+        max_drawdown = np.max(drawdown)
 
         return {
             'total_return': total_return,
@@ -110,6 +126,31 @@ class ActionPredictionTrading:
             'sharpe_ratio': sharpe_ratio,
             'max_drawdown': max_drawdown,
             'final_capital': capital,
+            'total_trades': total_trades,
             'stop_triggered': stop_triggered,
-            'limits': limits,
+        }
+
+    def simulate_buy_and_hold(self, initial_capital=100000, shares=100):
+        if self.df.empty:
+            raise ValueError("DataFrame is empty. Ensure the data was loaded correctly.")
+
+        price_buy = self.df.iloc[0]['actual']
+        price_sell = self.df.iloc[-1]['actual']
+
+        profit = (price_sell - price_buy) * shares
+        final_capital = initial_capital + profit
+        total_return = profit / initial_capital
+
+        capital_history = [
+            initial_capital + (self.df.iloc[i]['actual'] - price_buy) * shares
+            for i in range(len(self.df))
+        ]
+
+        return {
+            'total_return': total_return,
+            'initial_price': price_buy,
+            'final_price': price_sell,
+            'final_capital': final_capital,
+            'shares_held': shares,
+            'days_held': len(self.df),
         }
