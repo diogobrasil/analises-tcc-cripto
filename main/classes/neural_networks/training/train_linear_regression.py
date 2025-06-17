@@ -7,7 +7,7 @@ import logging
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
-from main.classes.neural_networks.architectures.linear_regression import LinearRegression
+from classes.neural_networks.architectures.linear_regression import LinearRegression
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -141,16 +141,6 @@ def train_and_evaluate(csv_path: str, target: str, window: int, model_dir: str, 
     np.save(os.path.join(model_dir, f"{target}_y_pred_v{version}.npy"), test_predictions)
     np.save(os.path.join(model_dir, f"{target}_X_test_norm_v{version}.npy"), X_test_norm)
     logging.info(f"Arquivos para análise de hipóteses salvos para {target}")
-
-    # Salvar os coeficientes em JSON
-    coefs = {
-        "intercept": float(theta[0]),
-        "lag_1": float(theta[1]),
-        "lag_2": float(theta[2]),
-        "lag_3": float(theta[3])
-    }
-    with open(os.path.join(model_dir, f"{target}_coefs_v{version}.json"), "w") as f:
-        json.dump(coefs, f)
     
     return model, theta, train_metrics, val_metrics, test_metrics, y_test, test_predictions
 

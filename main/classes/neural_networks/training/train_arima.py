@@ -37,7 +37,7 @@ def evaluate_model(y_true, y_pred):
     r2 = r2_score(y_true, y_pred)
     return {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'R2': r2}
 
-def train_and_evaluate_arima(csv_path, target, order, model_dir, version, split_date="2019-01-01"):
+def train_and_evaluate_arima(csv_path, target, order, model_dir, version, split_date="2019-01-01",rolling=True,step_size=1):
     logging.info(f"Carregando dados para {target}")
     df = load_data(csv_path)
 
@@ -53,15 +53,23 @@ def train_and_evaluate_arima(csv_path, target, order, model_dir, version, split_
 
     arima = ArimaModel(order)
     arima.fit(train)
-    
-    predictions = []
-    for t in range(len(test)):
-        yhat = arima.predict_one_step()
-        predictions.append(yhat)
+    if rolling:
+        predictions = []
 
-        # Corrigir o formato de new_value para update()
-        new_value = pd.Series([test.iloc[t]], index=[test.index[t]], name=target)
-        arima.update(new_value)
+        for t in range(0, len(test), step_size):
+            yhat = arima.model_fit.forecast(steps=step_size)
+            predictions.extend(yhat[:min(step_size, len(test) - len(predictions))])
+
+            # Atualiza o modelo apenas se ainda há dados futuros reais
+            if t + step_size < len(test):
+                new_values = test.iloc[t : t + step_size]
+                new_series = pd.Series(new_values.values, index=new_values.index, name=target)
+                arima.update(new_series)
+        
+        # Corta o excesso se houver
+        predictions = predictions[:len(test)]
+    else:
+        predictions = arima.model_fit.forecast(steps=len(test)).tolist()
 
 
     metrics = evaluate_model(test.values, predictions)
@@ -77,8 +85,8 @@ def train_and_evaluate_arima(csv_path, target, order, model_dir, version, split_
     metrics_path = os.path.join(model_dir, f"{target}_arima_rolling_metrics_v{version}.json")
     with open(metrics_path, 'w') as f:
         json.dump(metrics, f, indent=2)
-        
-    np.save(os.path.join(model_dir, f"{target}_arima_rolling_y_true_v{version}.npy"), test.values)
+
+    np.save(os.path.join(model_dir, f"{target}_arima_rolling_y_true_v{version}.npy"), test[:len(predictions)].values)
     np.save(os.path.join(model_dir, f"{target}_arima_rolling_y_pred_v{version}.npy"), predictions)
 
     logging.info(f"Modelo, métricas e previsões salvos em {model_dir}")
