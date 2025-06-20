@@ -4,4 +4,4 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-/saved_models
+/main/saved_models
