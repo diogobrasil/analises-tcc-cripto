@@ -30,15 +30,25 @@ def create_window_data(
     target: str,
     window_size: int = 3
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Gera X e y usando lag features de forma vetorizada.
-    """
-    # Concatena coluna target + lags
-    lags = [df[target].shift(lag).rename(f'lag_{lag}') for lag in range(1, window_size + 1)]
-    df_lagged = pd.concat([df[target]] + lags, axis=1).dropna()
-    X = df_lagged[[f'lag_{lag}' for lag in range(1, window_size + 1)]].values
-    y = df_lagged[target].values
-    return X, y
+        """
+        Gera X e y onde X contém os últimos 'window_size' preços (terminando em P_t),
+        e y é o preço do dia seguinte (P_{t+1}).
+        
+        Esta versão inclui o preço do dia atual (P_t) nas features.
+        """
+        # Muda o range para ir de 'window_size-1' até 0
+        # Ex: window=3 -> range(2, -1, -1) -> shifts de 2, 1, 0
+        lags = [df[target].shift(lag).rename(f'lag_{lag}') for lag in range(window_size - 1, -1, -1)]
+        
+        y = df[target].shift(-1).rename('y_next')
+
+        df_lagged = pd.concat(lags + [y], axis=1).dropna()
+        
+        # Atualiza a lista de colunas para extrair X
+        X = df_lagged[[f'lag_{lag}' for lag in range(window_size - 1, -1, -1)]].values
+        y = df_lagged['y_next'].values
+
+        return X, y
 
 
 def split_data_by_date(

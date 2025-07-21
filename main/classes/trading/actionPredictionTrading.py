@@ -6,97 +6,123 @@ class ActionPredictionTrading:
     """
     Classe para criar previsões de preço, simular operações de trading
     e comparar com buy-and-hold, usando regressão linear via equação normal.
+    Agora com suporte a MinMaxScaler para X e para y, e conversão correta de previsões.
     """
 
-    def __init__(self, df: pd.DataFrame, ticker: str, window: int = 3, model_path: str = None):
+    def __init__(self, df: pd.DataFrame, ticker: str, window: int = 3,
+                 model_path: str = None,
+                 scaler_x_path: str = None,
+                 scaler_y_path: str = None):
         """
         Args:
             df: DataFrame com colunas ['Date', ticker]
             ticker: nome da coluna de preços
             window: tamanho da janela de lag para features
             model_path: caminho para o arquivo do modelo serializado (joblib)
+            scaler_x_path: caminho para o scaler de X (joblib)
+            scaler_y_path: caminho para o scaler de y (joblib)
         """
         # Prepara DataFrame padronizado
         tmp = df[['Date', ticker]].dropna().reset_index(drop=True)
         tmp.columns = ['date', 'actual']
-        self.full_df = tmp.copy()       # Série completa para buy-and-hold
-        self.df = tmp.copy()            # Será fatiada para previsões
+        self.full_df = tmp.copy()
+        self.df = tmp.copy()
         self.window = window
         self.ticker = ticker
         self.model = None
         self.model_path = model_path
-        self.scaler = None
-
-    def create_windows(self) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Gera matrizes X e y usando janelas deslizantes de tamanho self.window.
-        
-        Returns:
-            X: array shape (n_samples, window)
-            y: array shape (n_samples,)
-        """
-        prices = self.df['actual'].values
-        n = len(prices)
-        if n <= self.window:
-            raise ValueError(f"Série muito curta: len={n}, window={self.window}")
-        
-        X, y = [], []
-        for i in range(self.window, n):
-            X.append(prices[i - self.window:i])
-            y.append(prices[i])
-        return np.array(X), np.array(y)
+        self.scaler_x = None
+        self.scaler_y = None
+        if scaler_x_path:
+            self.load_scaler_x(scaler_x_path)
+        if scaler_y_path:
+            self.load_scaler_y(scaler_y_path)
 
     def load_model(self):
-        """
-        Carrega o modelo serializado e verifica se 'theta' está presente.
-        """
         if not self.model_path:
             raise ValueError("Model path not specified.")
         self.model = joblib.load(self.model_path)
         if getattr(self.model, 'theta', None) is None:
-            raise RuntimeError("Modelo não contém `theta`. Verifique se salvou após `normal_equation`.")
+            raise RuntimeError("Modelo não contém `theta`. Salve após `normal_equation`.")
         print(f"Model loaded and validated from {self.model_path}")
 
-    def load_scaler(self, scaler_path: str):
-        """
-        Carrega e valida o scaler usado no treino.
-        
-        Args:
-            scaler_path: caminho para o scaler serializado (joblib)
-        """
-        self.scaler = joblib.load(scaler_path)
-        if not hasattr(self.scaler, 'scale_'):
-            raise ValueError("Scaler não está ajustado. Ajuste-o com X de treino antes de salvar.")
-        expected = getattr(self.scaler, 'n_features_in_', None)
-        if expected is None or expected != self.window:
+    def load_scaler_x(self, scaler_path: str):
+        """Carrega e valida o scaler usado em X"""
+        self.scaler_x = joblib.load(scaler_path)
+        if not hasattr(self.scaler_x, 'scale_'):
+            raise ValueError("Scaler X não está ajustado.")
+        expected = getattr(self.scaler_x, 'n_features_in_', None)
+        if expected != self.window:
             raise ValueError(
-                f"Scaler foi treinado com {expected} features, "
-                f"mas a janela atual é de {self.window}."
+                f"Scaler X treinado com {expected} features, janela atual={self.window}"
             )
-        print(f"Scaler loaded and validated for window={self.window}")
+        print(f"Scaler X loaded and validated for window={self.window}")
+
+    def load_scaler_y(self, scaler_path: str):
+        """Carrega e valida o scaler usado em y"""
+        self.scaler_y = joblib.load(scaler_path)
+        if not hasattr(self.scaler_y, 'data_min_'):
+            raise ValueError("Scaler Y não parece ser MinMaxScaler ou não ajustado.")
+        print("Scaler Y loaded and validated.")
+
+    def create_windows(self) -> tuple[np.ndarray, list[pd.Timestamp]]:
+        """
+        Gera X e as datas correspondentes (t).
+        Para cada data t, X contém os preços [P_{t-window+1}, ..., P_t].
+        A previsão será para o dia t+1.
+        """
+        prices = self.df['actual'].values
+        dates = self.df['date'].values
+        n = len(prices)
+
+        if n < self.window:
+            raise ValueError(f"Série muito curta para criar uma janela: len={n}, window={self.window}")
+
+        X, dates_t = [], []
+        # O loop agora começa em 'window - 1' para a primeira janela completa
+        # e vai até 'n - 1' para poder prever o último dia.
+        for i in range(self.window - 1, n - 1):
+            # A janela de features agora é [P_{i-window+1}, ..., P_i]
+            start_index = i - (self.window - 1)
+            end_index = i + 1
+            X.append(prices[start_index:end_index])
+            
+            # A data associada a esta janela é a data do último preço (hoje)
+            dates_t.append(dates[i])
+
+        return np.array(X), dates_t
+
 
     def generate_predictions(self):
-        """
-        Gera previsões para cada janela e reconstrói self.df sem defasagem.
-        """
         if self.model is None:
             raise ValueError("Model not loaded. Run `load_model()` first.")
+        
+        X, dates_t = self.create_windows()
+        
+        # Normaliza os dados de entrada se um scaler_x for fornecido
+        if self.scaler_x is not None:
+            X_norm = self.scaler_x.transform(X)
+        else:
+            X_norm = X
 
-        X, _ = self.create_windows()
-        if self.scaler is not None:
-            X = self.scaler.transform(X)
+        # Usa o método predict do modelo, que já lida com o bias
+        y_pred_norm = self.model.predict(X_norm)
 
-        # cálculo manual usando theta (bias + coefs)
-        X_bias = np.c_[np.ones((X.shape[0], 1)), X]
-        y_pred = X_bias @ self.model.theta
-
-        # alinha datas e valores
-        dates = self.df['date'].iloc[self.window:].reset_index(drop=True)
-        actuals = self.df['actual'].iloc[self.window:].reset_index(drop=True)
+        # Desnormaliza as previsões se um scaler_y for fornecido
+        if self.scaler_y is not None:
+            y_pred = self.scaler_y.inverse_transform(y_pred_norm.reshape(-1, 1)).ravel()
+        else:
+            y_pred = y_pred_norm
+        
+        # O DataFrame agora começa a partir da primeira data com uma predição válida
+        start_idx = self.window - 1
+        end_idx = len(self.df) - 1
+        
         self.df = pd.DataFrame({
-            'date': dates,
-            'actual': actuals,
-            'predicted': y_pred
+            'date':        self.df['date'].iloc[start_idx:end_idx].values,
+            'actual':      self.df['actual'].iloc[start_idx:end_idx].values,
+            'predicted':   y_pred,
+            'actual_next': self.df['actual'].iloc[start_idx + 1:].values
         })
 
     def simulate_trading(
@@ -105,38 +131,33 @@ class ActionPredictionTrading:
         initial_capital: float = 100000,
         shares_per_trade: int = 100,
         stop_type: str = 'percent',
-        stop_value: float = 0.02
+        stop_value: float = 0.03,
+        dead_zone_pct: float = 0.005
     ) -> dict:
-        """
-        Simula operações long/short baseadas nas previsões,
-        com stop-loss opcional.
-        """
         capital = initial_capital
         capital_history = [capital]
         hits = 0
         total_trades = 0
         profits = []
         stop_triggered = 0
+        #dead_zone_count = 0
 
         for i in range(len(self.df) - 1):
             price_today = self.df.iloc[i]['actual']
             price_tomorrow = self.df.iloc[i + 1]['actual']
-            prediction = self.df.iloc[i]['predicted']
+            predicted_price = self.df.iloc[i]['predicted']
+
+            """diff_pct = abs(predicted_price - price_today) / price_today
+            if diff_pct < dead_zone_pct:
+                dead_zone_count += 1
+                continue""" # we can remove this dead zone logic if not needed, i put it here to improve sharpe ratio performance
 
             limit = stop_value * price_today if stop_type == 'percent' else stop_value
             limit_amt = limit * shares_per_trade
 
-            if prediction > price_today:
-                position = 'long'
-            elif prediction < price_today:
-                position = 'short'
-            else:
-                continue  # sem posição
-
-            if position == 'long':
-                pnl = (price_tomorrow - price_today) * shares_per_trade
-            else:
-                pnl = (price_today - price_tomorrow) * shares_per_trade
+            position = 'long' if predicted_price > price_today else 'short'
+            pnl = ((price_tomorrow - price_today) if position == 'long'
+                   else (price_today - price_tomorrow)) * shares_per_trade
 
             if stop_loss and pnl < -limit_amt:
                 pnl = -limit_amt
@@ -147,18 +168,14 @@ class ActionPredictionTrading:
             total_trades += 1
             if pnl > 0:
                 hits += 1
-
             capital_history.append(capital)
 
-        hit_rate = hits / total_trades if total_trades > 0 else 0
+        hit_rate = hits / total_trades if total_trades else 0
         total_return = (capital - initial_capital) / initial_capital
-        sharpe_ratio = (
-            np.mean(profits) / np.std(profits)
-            if len(profits) > 1 and np.std(profits) != 0 else 0
-        )
+        sharpe_ratio = (np.mean(profits) / np.std(profits)
+                        if len(profits) > 1 and np.std(profits) else 0)
         peak = np.maximum.accumulate(capital_history)
-        drawdown = (peak - capital_history) / peak
-        max_drawdown = np.max(drawdown)
+        max_drawdown = np.max((peak - capital_history) / peak)
 
         return {
             'total_return': total_return,
@@ -168,6 +185,10 @@ class ActionPredictionTrading:
             'final_capital': capital,
             'total_trades': total_trades,
             'stop_triggered': stop_triggered,
+            'predicted_prices': self.df['predicted'].tolist(),
+            'today_prices': self.df['actual'].tolist(),
+            'tomorrow_prices': self.df['actual'].shift(-1).tolist(),
+            'dates': self.df['date'].tolist()
         }
 
     def simulate_buy_and_hold(
@@ -175,9 +196,6 @@ class ActionPredictionTrading:
         initial_capital: float = 100000,
         shares: int = 100
     ) -> dict:
-        """
-        Compara buy-and-hold na série completa de preços (full_df).
-        """
         df_bh = self.full_df
         if df_bh.empty:
             raise ValueError("DataFrame is empty. Ensure the data was loaded correctly.")
