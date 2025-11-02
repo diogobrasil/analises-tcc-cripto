@@ -5,5 +5,6 @@ __pycache__/
 *$py.class
 
 /main/saved_models
+
 # Ignorar arquivos de log
 *.log
