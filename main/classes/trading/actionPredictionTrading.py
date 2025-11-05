@@ -176,6 +176,10 @@ class ActionPredictionTrading:
                         if len(profits) > 1 and np.std(profits) else 0)
         peak = np.maximum.accumulate(capital_history)
         max_drawdown = np.max((peak - capital_history) / peak)
+        profitable_trades = hit_rate * total_trades
+        unprofitable_trades = total_trades - profitable_trades
+        avg_return_per_trade = total_return / total_trades if total_trades else 0
+
 
         return {
             'total_return': total_return,
@@ -184,6 +188,9 @@ class ActionPredictionTrading:
             'max_drawdown': max_drawdown,
             'final_capital': capital,
             'total_trades': total_trades,
+            'profitable_trades': profitable_trades,
+            'unprofitable_trades': unprofitable_trades,
+            'avg_return_per_trade': avg_return_per_trade,
             'stop_triggered': stop_triggered,
             'predicted_prices': self.df['predicted'].tolist(),
             'today_prices': self.df['actual'].tolist(),
