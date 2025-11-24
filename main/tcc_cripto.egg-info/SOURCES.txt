@@ -11,6 +11,8 @@ main/classes/neural_networks/architectures/__init__.py
 main/classes/neural_networks/architectures/arima_model.py
 main/classes/neural_networks/architectures/base_model.py
 main/classes/neural_networks/architectures/linear_regression.py
+main/classes/trading/__init__.py
+main/classes/trading/actionPredictionTrading.py
 main/classes/visualization/__init__.py
 main/classes/visualization/visualization.py
 main/tcc_cripto.egg-info/PKG-INFO
