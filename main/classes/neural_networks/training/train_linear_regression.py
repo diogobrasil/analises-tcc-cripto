@@ -1,7 +1,10 @@
-import os
+#!/usr/bin/env python3
+
 import json
 import logging
+import argparse
 from pathlib import Path
+import tempfile
 
 import pandas as pd
 import numpy as np
@@ -15,215 +18,349 @@ from classes.neural_networks.architectures.linear_regression import LinearRegres
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def load_data(csv_path: str) -> pd.DataFrame:
+# -------------------------
+# Utilities / Validações
+# -------------------------
+def validate_config(cfg: dict):
+    """Validação mínima do config para evitar KeyErrors silenciosos."""
+    required = [
+        ('data', 'filepath'),
+        ('data', 'date_col'),
+        ('data', 'target_col'),
+        ('training', 'window_size'),
+        ('training', 'test_split_ratio'),
+        ('output', 'model_dir'),
+        ('output', 'version_tag')
+    ]
+    missing = []
+    for section, key in required:
+        if section not in cfg or key not in cfg[section]:
+            missing.append(f"{section}.{key}")
+    if missing:
+        raise KeyError(f"Config missing required keys: {missing}")
+
+    test_ratio = cfg['training']['test_split_ratio']
+    if not (0.0 < test_ratio < 1.0):
+        raise ValueError("training.test_split_ratio must be between 0 and 1 (exclusive).")
+
+
+# -------------------------
+# 1. Load (CSV/Parquet) + timezone
+# -------------------------
+def load_data(filepath: str, date_col: str, tz: str = "UTC") -> pd.DataFrame:
     """
-    Carrega o CSV, parseia a coluna Date como datetime e define como índice.
+    Carrega CSV ou Parquet, converte a coluna de data, define índice e normaliza timezone.
+    Raises se date_col não existir.
     """
-    df = pd.read_csv(csv_path, parse_dates=['Date'])
-    df.set_index('Date', inplace=True)
+    logging.info(f"Loading data from: {filepath}")
+    path = Path(filepath)
+
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {filepath}")
+
+    # Leitura dependendo do formato
+    if path.suffix.lower() == '.parquet':
+        df = pd.read_parquet(path)
+    else:
+        # Para CSV usamos infer_datetime_format mais tarde
+        df = pd.read_csv(path)
+
+    # Validação da coluna de data
+    if date_col not in df.columns:
+        raise ValueError(f"date_col '{date_col}' not found in file. Available columns: {list(df.columns)}")
+
+    # Converter e indexar
+    df[date_col] = pd.to_datetime(df[date_col], infer_datetime_format=True)
+    df.set_index(date_col, inplace=True)
     df.sort_index(inplace=True)
+
+    # Timezone handling
+    if df.index.tz is None:
+        logging.info(f"Localizing naive datetimes to timezone: {tz}")
+        try:
+            df.index = df.index.tz_localize(tz)
+        except Exception as e:
+            logging.error(f"Failed to localize index to {tz}: {e}")
+            raise
+    else:
+        if str(df.index.tz) != tz:
+            logging.info(f"Converting index timezone from {df.index.tz} to {tz}")
+            try:
+                df.index = df.index.tz_convert(tz)
+            except Exception as e:
+                logging.error(f"Failed to convert timezone to {tz}: {e}")
+                raise
+
     return df
 
 
+# -------------------------
+# 2. Windowing (protege cross-day)
+# -------------------------
 def create_window_data(
     df: pd.DataFrame,
     target: str,
-    window_size: int = 3
-) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Gera X e y onde X contém os últimos 'window_size' preços (terminando em P_t),
-        e y é o preço do dia seguinte (P_{t+1}).
-        
-        Esta versão inclui o preço do dia atual (P_t) nas features.
-        """
-        # Muda o range para ir de 'window_size-1' até 0
-        # Ex: window=3 -> range(2, -1, -1) -> shifts de 2, 1, 0
-        lags = [df[target].shift(lag).rename(f'lag_{lag}') for lag in range(window_size - 1, -1, -1)]
-        
-        y = df[target].shift(-1).rename('y_next')
-
-        df_lagged = pd.concat(lags + [y], axis=1).dropna()
-        
-        # Atualiza a lista de colunas para extrair X
-        X = df_lagged[[f'lag_{lag}' for lag in range(window_size - 1, -1, -1)]].values
-        y = df_lagged['y_next'].values
-
-        return X, y
-
-
-def split_data_by_date(
-    df: pd.DataFrame,
-    target: str,
-    train_end: str = '2017-12-31',
-    val_end: str = '2018-12-31'
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    window_size: int,
+    filter_cross_day: bool = True
+) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
     """
-    Divide em treino, validação e teste com base em datas.
+    Gera janelas (X) e targets (y) usando lags:
+      - X shape (n_samples, window_size) se univariado
+      - y shape (n_samples,)
+    Retorna também os timestamps que representam o instante associado a cada sample (timestamp de y_next).
+    Se filter_cross_day=True, remove janelas cujo lag mais antigo pertence a outro dia (evita leakage overnight).
     """
-    train_df = df.loc[:train_end]
-    val_df   = df.loc[train_end:val_end]
-    test_df  = df.loc[val_end:]
 
-    X_train, y_train = create_window_data(train_df, target)
-    X_val,   y_val   = create_window_data(val_df,   target)
-    X_test,  y_test  = create_window_data(test_df,  target)
+    if target not in df.columns:
+        raise ValueError(f"Target '{target}' não existe no dataframe. Colunas: {list(df.columns)}")
 
-    return X_train, X_val, X_test, y_train, y_val, y_test
+    if window_size < 1:
+        raise ValueError("window_size must be >= 1")
+
+    # Cria lags (do mais antigo para o mais recente)
+    lags = {}
+    for lag in range(window_size - 1, -1, -1):
+        lags[f'lag_{lag}'] = df[target].shift(lag)
+
+    df_features = pd.DataFrame(lags, index=df.index)
+    df_features['y_next'] = df[target].shift(-1)
+
+    # Colunas auxiliares para detecção de cross-day
+    df_features['date_current'] = df_features.index.date
+    df_features['date_oldest_lag'] = pd.Series(df_features.index.date, index=df_features.index).shift(window_size - 1)
+
+    # Drop NaNs gerados pelos shifts
+    df_clean = df_features.dropna().copy()
+    if df_clean.empty:
+        raise ValueError("No valid windows produced after shifting. Try a smaller window_size or check data length.")
+
+    if filter_cross_day: 
+        initial_len = len(df_clean)
+        mask_same_day = df_clean['date_current'] == df_clean['date_oldest_lag']
+        df_clean = df_clean[mask_same_day]
+        removed = initial_len - len(df_clean)
+        if removed > 0:
+            logging.warning(f"Cross-day filter removed {removed} windows (overnight gaps).")
+        if df_clean.empty:
+            raise ValueError("All windows removed by cross-day filter. Adjust window_size or disable filter_cross_day.")
+
+    feature_cols = [f'lag_{lag}' for lag in range(window_size - 1, -1, -1)]
+    X = df_clean[feature_cols].values    # (n_samples, window_size) for univariate
+    y = df_clean['y_next'].values
+    timestamps = df_clean.index         # timestamps aligned to y_next
+
+    return X, y, timestamps
 
 
+# -------------------------
+# 3. Split temporally com embargo (Timedelta)
+# -------------------------
+def split_data_time_anchored(
+    X: np.ndarray,
+    y: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    test_ratio: float,
+    embargo_str: str = "0s"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.Timestamp]:
+    """
+    Divide em treino/test com base em tempo:
+      - test_ratio é a fração destinada ao teste (0..1)
+      - embargo_str pode ser '0s', '5min', '30s', etc.
+    Retorna X_train, X_test, y_train, y_test e o train_end_time (Timestamp) usado.
+    """
+
+    if not (0.0 < test_ratio < 1.0):
+        raise ValueError("test_ratio must be between 0 and 1 (exclusive).")
+
+    n_samples = len(X)
+    if n_samples == 0:
+        raise ValueError("Empty X provided to split_data_time_anchored.")
+
+    train_size = int(n_samples * (1.0 - test_ratio))
+    if train_size <= 0:
+        raise ValueError("Train size computed as 0 — reduce test_ratio or provide more data.")
+
+    # O último timestamp do treino é o índice train_size - 1 (off-by-one corrigido)
+    train_end_time = timestamps[train_size - 1]
+
+    embargo_delta = pd.to_timedelta(embargo_str)
+    test_start_time_threshold = train_end_time + embargo_delta
+
+    # Busca o primeiro índice cujo timestamp >= threshold
+    # (use searchsorted; timestamps já é Index ordenado)
+    test_start_idx = timestamps.searchsorted(test_start_time_threshold)
+
+    # Se embargo purgar todo o teste, lançar erro
+    if test_start_idx >= n_samples:
+        raise ValueError(
+            f"Embargo too large — no test samples left. "
+            f"train_end_time={train_end_time}, embargo={embargo_str}, threshold={test_start_time_threshold}"
+        )
+
+    # Partições
+    X_train = X[:train_size]
+    y_train = y[:train_size]
+
+    X_test = X[test_start_idx:]
+    y_test = y[test_start_idx:]
+
+    purge_count = test_start_idx - train_size
+    logging.info("--- Split Info ---")
+    logging.info(f"Total samples: {n_samples}, Train size: {train_size}, Test start idx: {test_start_idx}")
+    logging.info(f"Train end time: {train_end_time}, embargo: {embargo_str}, purge_count: {purge_count}")
+    if len(X_test) > 0:
+        logging.info(f"Test start time: {timestamps[test_start_idx]}")
+    else:
+        logging.error("No test data after applying embargo.")
+
+    return X_train, X_test, y_train, y_test, train_end_time
+
+
+# -------------------------
+# 4. Normalização (2D / nota para 3D)
+# -------------------------
 def normalize_data(
     X_train: np.ndarray,
-    X_val: np.ndarray,
     X_test: np.ndarray,
     y_train: np.ndarray,
-    y_val: np.ndarray,
     y_test: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, MinMaxScaler, MinMaxScaler]:
+):
     """
-    Ajusta MinMaxScaler em X_train e y_train, e transforma val/test.
+    Normaliza com MinMaxScaler. Suporta X 2D (n_samples, features).
+    Se futuramente X for 3D para LSTM, adapte para escalonar por feature via reshape.
     """
     scaler_X = MinMaxScaler()
     scaler_y = MinMaxScaler()
 
-    X_train_norm = scaler_X.fit_transform(X_train)
-    X_val_norm   = scaler_X.transform(X_val)
-    X_test_norm  = scaler_X.transform(X_test)
+    # assumimos X 2D para Regressão Linear simples
+    X_train_n = scaler_X.fit_transform(X_train)
+    X_test_n = scaler_X.transform(X_test)
 
-    y_train_norm = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
-    y_val_norm   = scaler_y.transform(y_val.reshape(-1, 1)).ravel()
-    y_test_norm  = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
+    y_train_n = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
+    y_test_n = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
 
-    return (
-        X_train_norm, X_val_norm, X_test_norm,
-        y_train_norm, y_val_norm, y_test_norm,
-        scaler_X, scaler_y
+    return X_train_n, X_test_n, y_train_n, y_test_n, scaler_X, scaler_y
+
+
+# -------------------------
+# 5. Pipeline principal
+# -------------------------
+def run_training_pipeline(config: dict):
+    validate_config(config)
+
+    data_cfg = config['data']
+    train_cfg = config['training']
+    out_cfg = config['output']
+
+    target = data_cfg['target_col']
+
+    # 1. Load
+    df = load_data(data_cfg['filepath'], data_cfg['date_col'], data_cfg.get('timezone', 'UTC'))
+
+    # Confirma target
+    if target not in df.columns:
+        raise ValueError(f"Target column '{target}' not found. Available columns: {list(df.columns)}")
+
+    # 2. Windowing
+    X, y, timestamps = create_window_data(
+        df,
+        target,
+        train_cfg['window_size'],
+        filter_cross_day=train_cfg.get('filter_cross_day', True)
     )
 
+    # 3. Split (Train/Test) com embargo de tempo
+    X_train, X_test, y_train, y_test, train_end_time = split_data_time_anchored(
+        X, y, timestamps,
+        test_ratio=train_cfg['test_split_ratio'],
+        embargo_str=train_cfg.get('embargo', "0s")
+    )
 
-def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """
-    Calcula métricas de regressão.
-    """
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
+    # 4. Normalize
+    X_train_n, X_test_n, y_train_n, y_test_n, scaler_X, scaler_y = normalize_data(
+        X_train, X_test, y_train, y_test
+    )
 
-    return {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'R2': r2}
-
-
-def train_and_evaluate(
-    csv_path: str,
-    target: str,
-    window: int,
-    model_dir: str,
-    version: str
-) -> dict:
-    """
-    Pipeline de treinamento de regressão linear:
-      - carrega dados
-      - divide treino/val/test
-      - normaliza
-      - treina pela equação normal
-      - avalia e salva artefatos
-    """
-    logging.info(f"Loading data for {target} from {csv_path}")
-    df = load_data(csv_path)
-
-    if target not in df.columns:
-        raise ValueError(f"Target column '{target}' not found. Available: {list(df.columns)}")
-
-    X_train, X_val, X_test, y_train, y_val, y_test = split_data_by_date(df, target)
-    logging.info("Normalizing data")
-    (
-        X_train_n, X_val_n, X_test_n,
-        y_train_n, y_val_n, y_test_n,
-        scaler_X, scaler_y
-    ) = normalize_data(X_train, X_val, X_test, y_train, y_val, y_test)
-
+    # 5. Train
+    logging.info("Training Linear Regression...")
     model = LinearRegression()
-    logging.info("Training model (normal equation)")
+    # LinearRegression.normal_equation deve aceitar X 2D
     theta = model.normal_equation(X_train_n, y_train_n)
 
-    # previsões (normalizadas)
-    y_train_pred_n = model.predict(X_train_n)
-    y_val_pred_n   = model.predict(X_val_n)
-    y_test_pred_n  = model.predict(X_test_n)
+    # 6. Evaluate
+    y_pred_n = model.predict(X_test_n)
+    y_pred = scaler_y.inverse_transform(y_pred_n.reshape(-1, 1)).ravel()
 
-    logging.info("Denormalizing predictions")
-    y_train_pred = scaler_y.inverse_transform(y_train_pred_n.reshape(-1, 1)).ravel()
-    y_val_pred   = scaler_y.inverse_transform(y_val_pred_n.reshape(-1, 1)).ravel()
-    y_test_pred  = scaler_y.inverse_transform(y_test_pred_n.reshape(-1, 1)).ravel()
+    metrics = {
+        'RMSE': float(np.sqrt(mean_squared_error(y_test, y_pred))),
+        'MAE': float(mean_absolute_error(y_test, y_pred)),
+        'R2': float(r2_score(y_test, y_pred))
+    }
+    logging.info(f"Metrics: {json.dumps(metrics, indent=2)}")
 
-    logging.info("Evaluating model")
-    train_metrics = evaluate_model(y_train, y_train_pred)
-    val_metrics   = evaluate_model(y_val,   y_val_pred)
-    test_metrics  = evaluate_model(y_test,  y_test_pred)
+    # 7. Save artifacts (atomic save via arquivos temporários)
+    save_path = Path(out_cfg['model_dir'])
+    save_path.mkdir(parents=True, exist_ok=True)
+    ver = out_cfg['version_tag']
 
-    for phase, metrics in [('Train', train_metrics), ('Val', val_metrics), ('Test', test_metrics)]:
-        logging.info(f"{phase} metrics:")
-        for name, val in metrics.items():
-            logging.info(f"  {name}: {val:.4f}")
+    # caminhos finais
+    model_path = save_path / f"{target}_model_{ver}.pkl"
+    scalerX_path = save_path / f"{target}_scalerX_{ver}.pkl"
+    scalerY_path = save_path / f"{target}_scalerY_{ver}.pkl"
+    metadata_path = save_path / f"{target}_metadata_{ver}.json"
 
-    # prepara diretórios
-    model_dir_path = Path(model_dir)
-    model_dir_path.mkdir(parents=True, exist_ok=True)
+    # atomic-ish dumps (write to temp file then rename)
+    with tempfile.NamedTemporaryFile(delete=False, dir=save_path) as tmp_m:
+        joblib.dump(model, tmp_m.name)
+        tmp_m.flush()
+    Path(tmp_m.name).replace(model_path)
 
-    # salva modelo e scalers (com compressão)
-    model_path    = model_dir_path / f"{target}_model_v{version}.pkl"
-    scaler_X_path = model_dir_path / f"{target}_scaler_X_v{version}.pkl"
-    scaler_y_path = model_dir_path / f"{target}_scaler_y_v{version}.pkl"
+    with tempfile.NamedTemporaryFile(delete=False, dir=save_path) as tmp_sx:
+        joblib.dump(scaler_X, tmp_sx.name)
+        tmp_sx.flush()
+    Path(tmp_sx.name).replace(scalerX_path)
 
-    joblib.dump(model, model_path,    compress=('gzip', 3))
-    joblib.dump(scaler_X, scaler_X_path, compress=('gzip', 3))
-    joblib.dump(scaler_y, scaler_y_path, compress=('gzip', 3))
-    logging.info(f"Saved model and scalers to {model_dir_path}")
+    with tempfile.NamedTemporaryFile(delete=False, dir=save_path) as tmp_sy:
+        joblib.dump(scaler_y, tmp_sy.name)
+        tmp_sy.flush()
+    Path(tmp_sy.name).replace(scalerY_path)
 
-    # salva métricas em JSON legível
-    metrics_path = model_dir_path / f"{target}_metrics_v{version}.json"
-    with open(metrics_path, 'w', encoding='utf-8') as f:
-        json.dump({
-            'train': train_metrics,
-            'val':   val_metrics,
-            'test':  test_metrics
-        }, f, indent=4, ensure_ascii=False)
-    logging.info(f"Saved metrics to {metrics_path}")
-
-    # salva arrays para análises posteriores
-    np.save(model_dir_path / f"{target}_y_test_v{version}.npy",   y_test)
-    np.save(model_dir_path / f"{target}_y_pred_v{version}.npy",   y_test_pred)
-    np.save(model_dir_path / f"{target}_X_test_norm_v{version}.npy", X_test_n)
-    logging.info("Saved test arrays for hypothesis analysis")
-
-    return {
-        'model': model,
-        'theta': theta,
-        'metrics': {
-            'train': train_metrics,
-            'val': val_metrics,
-            'test': test_metrics
+    # Metadata completo para reprodutibilidade
+    metadata = {
+        "metrics": metrics,
+        "config": config,
+        "training_info": {
+            "train_samples": len(X_train),
+            "test_samples": len(X_test),
+            "features_shape": X_train.shape,
+            "input_columns": [f'lag_{i}' for i in range(train_cfg['window_size'] - 1, -1, -1)],
+            "train_end_time": str(train_end_time),
+            "timezone": str(df.index.tz)
         },
-        'y_test': y_test,
-        'y_pred': y_test_pred
+        "artifact_paths": {
+            "model": str(model_path),
+            "scaler_X": str(scalerX_path),
+            "scaler_y": str(scalerY_path)
+        }
     }
 
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, dir=save_path, encoding='utf-8') as tmp_meta:
+        json.dump(metadata, tmp_meta, indent=4, ensure_ascii=False)
+        tmp_meta.flush()
+    Path(tmp_meta.name).replace(metadata_path)
 
+    logging.info(f"Pipeline Finished. Artifacts saved to {save_path.resolve()}")
+
+
+# -------------------------
+# CLI
+# -------------------------
 if __name__ == '__main__':
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Treinamento de regressão linear com janelas e normalização"
-    )
-    parser.add_argument('--csv_path', type=str, default="main/datasets/b3_dados/processed/acoes_concat.csv")
-    parser.add_argument('--target',   type=str, required=True)
-    parser.add_argument('--window',   type=int, default=3)
-    parser.add_argument('--model_dir',type=str, default="main/saved_models/linear_regression")
-    parser.add_argument('--version',  type=str, default="1.0")
-
+    parser = argparse.ArgumentParser(description="Treinamento intraday - pipeline")
+    parser.add_argument('--config', type=str, required=True, help="Caminho para arquivo JSON de configuração")
     args = parser.parse_args()
-    logging.info(f"Starting training for {args.target}")
-    train_and_evaluate(
-        args.csv_path, args.target,
-        args.window, args.model_dir,
-        args.version
-    )
+
+    with open(args.config, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+
+    run_training_pipeline(cfg)
