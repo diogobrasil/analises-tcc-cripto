@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 import joblib
 
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
 from classes.neural_networks.architectures.linear_regression import LinearRegression
@@ -32,6 +32,8 @@ def validate_config(cfg: dict):
         ('output', 'model_dir'),
         ('output', 'version_tag')
     ]
+    # features is optional in training/data, handled in pipeline
+
     missing = []
     for section, key in required:
         if section not in cfg or key not in cfg[section]:
@@ -101,53 +103,66 @@ def create_window_data(
     df: pd.DataFrame,
     target: str,
     window_size: int,
-    filter_cross_day: bool = True
-) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
+    filter_cross_day: bool = True,
+    use_returns: bool = False  
+) -> tuple:
     """
-    Gera janelas (X) e targets (y) usando lags:
-      - X shape (n_samples, window_size) se univariado
-      - y shape (n_samples,)
-    Retorna também os timestamps que representam o instante associado a cada sample (timestamp de y_next).
-    Se filter_cross_day=True, remove janelas cujo lag mais antigo pertence a outro dia (evita leakage overnight).
+    Gera janelas (X) e targets (y).
+    Se filter_cross_day=True, remove janelas que cruzam dias.
+    Se use_returns=True, aplica log returns ao target antes de criar janelas.
     """
+    
+    # 1. Trabalhamos numa cópia para segurança
+    df_proc = df.copy()
 
-    if target not in df.columns:
-        raise ValueError(f"Target '{target}' não existe no dataframe. Colunas: {list(df.columns)}")
+    # 2. Transformação de Preço para Retorno (Se ativado no config)
+    if use_returns:
+        logging.info(f"Aplicando Log Returns na coluna '{target}'...")
+        # Fórmula: ln(Preço_t / Preço_t-1)
+        # Transforma o dado bruto em variação percentual estabilizada
+        df_proc[target] = np.log(df_proc[target] / df_proc[target].shift(1))
+        
+        # O primeiro valor vira NaN (não tem anterior), removemos ele
+        df_proc.dropna(subset=[target], inplace=True)
 
-    if window_size < 1:
-        raise ValueError("window_size must be >= 1")
-
-    # Cria lags (do mais antigo para o mais recente)
+    # Validação pós-processamento
+    if target not in df_proc.columns:
+        raise ValueError(f"Target '{target}' não encontrado após processamento.")
+    
+    # 3. Criação dos Lags (A Lógica Original que funcionava)
+    # Gera de lag_(window-1) até lag_0 (que é o candle atual)
     lags = {}
     for lag in range(window_size - 1, -1, -1):
-        lags[f'lag_{lag}'] = df[target].shift(lag)
+        lags[f'lag_{lag}'] = df_proc[target].shift(lag)
+    
+    df_features = pd.DataFrame(lags, index=df_proc.index)
+    
+    # O alvo é o próximo passo (t+1)
+    df_features['y_next'] = df_proc[target].shift(-1)
 
-    df_features = pd.DataFrame(lags, index=df.index)
-    df_features['y_next'] = df[target].shift(-1)
-
-    # Colunas auxiliares para detecção de cross-day
+    # 4. Lógica de Data para o Filtro (A Original Robusta)
     df_features['date_current'] = df_features.index.date
+    # Shiftamos a data para saber de qual dia veio o dado mais antigo da janela
     df_features['date_oldest_lag'] = pd.Series(df_features.index.date, index=df_features.index).shift(window_size - 1)
 
-    # Drop NaNs gerados pelos shifts
+    # Limpeza de NaNs gerados pelo shift da janela
     df_clean = df_features.dropna().copy()
-    if df_clean.empty:
-        raise ValueError("No valid windows produced after shifting. Try a smaller window_size or check data length.")
 
-    if filter_cross_day: 
+    # 5. Filtro Cross-Day (Overnight Gap)
+    if filter_cross_day:
         initial_len = len(df_clean)
         mask_same_day = df_clean['date_current'] == df_clean['date_oldest_lag']
         df_clean = df_clean[mask_same_day]
+        
         removed = initial_len - len(df_clean)
         if removed > 0:
-            logging.warning(f"Cross-day filter removed {removed} windows (overnight gaps).")
-        if df_clean.empty:
-            raise ValueError("All windows removed by cross-day filter. Adjust window_size or disable filter_cross_day.")
+            logging.warning(f"Cross-day filter removed {removed} windows.")
 
+    # 6. Retorno Final
     feature_cols = [f'lag_{lag}' for lag in range(window_size - 1, -1, -1)]
-    X = df_clean[feature_cols].values    # (n_samples, window_size) for univariate
+    X = df_clean[feature_cols].values
     y = df_clean['y_next'].values
-    timestamps = df_clean.index         # timestamps aligned to y_next
+    timestamps = df_clean.index
 
     return X, y, timestamps
 
@@ -229,8 +244,8 @@ def normalize_data(
     Normaliza com MinMaxScaler. Suporta X 2D (n_samples, features).
     Se futuramente X for 3D para LSTM, adapte para escalonar por feature via reshape.
     """
-    scaler_X = MinMaxScaler()
-    scaler_y = MinMaxScaler()
+    scaler_X = StandardScaler()
+    scaler_y = StandardScaler()
 
     # assumimos X 2D para Regressão Linear simples
     X_train_n = scaler_X.fit_transform(X_train)
@@ -266,6 +281,7 @@ def run_training_pipeline(config: dict):
         df,
         target,
         train_cfg['window_size'],
+            use_returns=train_cfg.get('use_returns', False),
         filter_cross_day=train_cfg.get('filter_cross_day', True)
     )
 

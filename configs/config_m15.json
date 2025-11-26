@@ -9,10 +9,11 @@
         "window_size": 10,
         "test_split_ratio": 0.2,
         "embargo": "1h",
-        "filter_cross_day": true
+        "filter_cross_day": true,
+        "use_returns": true
     },
     "output": {
         "model_dir": "main/saved_models/linear_regression_M15",
-        "version_tag": "intraday_teste_01"
+        "version_tag": "intraday_returns_01"
     }
 }
