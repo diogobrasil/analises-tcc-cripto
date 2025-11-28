@@ -1,191 +1,195 @@
+import sys
+from pathlib import Path
+
+# Adiciona a pasta 'main' ao caminho de busca do Python
+# Ajuste o número de '.parent' se necessário até apontar para a pasta que contém 'classes'
+current_file = Path(__file__).resolve()
+project_root = current_file.parent.parent.parent.parent # Sobe até a raiz do projeto
+sys.path.append(str(project_root)) # Adiciona a raiz geral
+sys.path.append(str(project_root / 'main')) # Adiciona a pasta main especificamente
+
+# Importar a classe ArimaModel
+from classes.neural_networks.architectures.arima_model import ArimaModel
+
 import json
 import logging
+import argparse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import joblib
-import pandas_market_calendars as mcal
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-
-from main.classes.neural_networks.architectures.arima_model import ArimaModel
+from sklearn.metrics import mean_squared_error, mean_absolute_error, accuracy_score
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# calendário oficial da B3
-b3_cal = mcal.get_calendar('B3')
-
-
-def load_series(csv_path: str, target: str) -> pd.Series:
+def load_and_transform_data(csv_path: str, target_col: str) -> pd.Series:
     """
-    Carrega a série de preços do `target` indexada somente em dias úteis
-    pelo calendário da B3. Retorna uma pd.Series com índice datetime.
+    Carrega dados intradiários e converte para Retornos Logarítmicos.
+    Crítico para ARIMA funcionar em 15min.
     """
+    logger.info(f"Carregando dataset: {csv_path}")
     df = pd.read_csv(csv_path, parse_dates=['Date'], index_col='Date')
     df.sort_index(inplace=True)
-    schedule = b3_cal.schedule(start_date=df.index.min(), end_date=df.index.max())
-    full_idx = schedule.index
-    ts = df[target].reindex(full_idx).dropna()
-    return ts
 
+    # Verifica se a coluna existe
+    if target_col not in df.columns:
+        raise ValueError(f"Coluna '{target_col}' não encontrada no CSV.")
 
-def split_series(
-    ts: pd.Series,
-    train_end: str = "2017-12-31",
-    val_end:   str = "2018-12-31"
-) -> tuple[pd.Series, pd.Series, pd.Series]:
+    # --- TRANSFORMAÇÃO ---
+    # Log Return: ln(Pt / Pt-1)
+    # Adicionamos fillna(0) ou dropna() para o primeiro elemento
+    ts_log_ret = np.log(df[target_col] / df[target_col].shift(1))
+    ts_log_ret.dropna(inplace=True)
+
+    # Remover retornos infinitos (caso de preço zero, raro mas possível em bugs de dados)
+    ts_log_ret = ts_log_ret.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    logger.info(f"Dados transformados para Log-Returns. Total de linhas: {len(ts_log_ret)}")
+    return ts_log_ret
+
+def split_series_by_date(ts: pd.Series, train_end: str, val_end: str):
     """
-    Divide `ts` em três pedaços:
-      - train: até `train_end` (inclusive)
-      - val: de `train_end` até `val_end`
-      - test: após `val_end`
+    Divide baseada em datas strings. Suporta formato ISO (YYYY-MM-DD HH:MM).
     """
-    train_series = ts[:train_end]
-    val_series   = ts[train_end:val_end]
-    test_series  = ts[val_end:]
-    return train_series, val_series, test_series
+    # Converter strings para timestamp para garantir comparação correta
+    train_end_dt = pd.to_datetime(train_end)
+    val_end_dt = pd.to_datetime(val_end)
 
+    train = ts.loc["2025":train_end]
 
-def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    # Adicione este print/log para conferir no terminal:
+    logger.info(f"Treino iniciado em: {train.index.min()} | Finalizado em: {train.index.max()}")
+
+    val = ts.loc[train_end:val_end].iloc[1:] # Evitar sobreposição exata
+    test = ts.loc[val_end:].iloc[1:]
+    
+    return train, val, test
+
+def evaluate_model(y_true, y_pred):
     """
-    Calcula métricas de regressão: MSE, RMSE, MAE e R².
+    Métricas adaptadas. Inclui 'Directional Accuracy' (Sinal).
     """
     y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)[: len(y_true)]
-    mse  = mean_squared_error(y_true, y_pred)
+    y_pred = np.asarray(y_pred)
+    
+    # Alinha tamanhos
+    min_len = min(len(y_true), len(y_pred))
+    y_true = y_true[:min_len]
+    y_pred = y_pred[:min_len]
+
+    mse = mean_squared_error(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
     rmse = np.sqrt(mse)
-    mae  = mean_absolute_error(y_true, y_pred)
-    r2   = r2_score(y_true, y_pred)
-    return {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'R2': r2}
+    
+    # Directional Accuracy: O modelo acertou se subiu ou caiu?
+    # (Sinal do predito == Sinal do real)
+    true_sign = np.sign(y_true)
+    pred_sign = np.sign(y_pred)
+    accuracy = accuracy_score(true_sign, pred_sign)
 
+    return {
+        'MSE': mse, 
+        'RMSE': rmse, 
+        'MAE': mae, 
+        'DIR_ACC': accuracy # 0.50 = moeda, > 0.55 = bom para intraday
+    }
 
-def rolling_forecast(model_fit, series: pd.Series, step_size: int) -> np.ndarray:
+def rolling_forecast_optimized(model_wrapper, series: pd.Series, step_size: int = 1):
     """
-    Executa previsão em janela deslizante, estendendo `model_fit`
-    com valores reais conforme avançamos.
+    Executa previsão em janela deslizante.
+    Para intraday, usamos 'update' (filtro) em vez de 'fit' completo para performance.
     """
     preds = []
-    start = 0
-    while start < len(series):
-        h = min(step_size, len(series) - start)
-        yhat = model_fit.forecast(steps=h)
-        preds.extend(yhat)
-        if start + h < len(series):
-            model_fit = model_fit.extend(series.iloc[start : start + h].values)
-        start += h
+    # Usamos os valores da série para atualizar o histórico
+    history = series.values
+    
+    # Loop for chunks if step_size > 1, or simple loop
+    # Atenção: Iterar pandas series é lento, usar numpy values
+    series_values = series.values
+    
+    # Estado inicial já está treinado no wrapper
+    
+    for i in range(0, len(series_values), step_size):
+        # 1. Prever
+        mu, sigma = model_wrapper.predict_next(steps=step_size)
+        
+        # Se step_size > 1, o modelo retorna array, aqui simplificamos para step=1 ou pegamos o primeiro
+        # Para simplificar este exemplo, assumimos step_size=1
+        preds.append(mu)
+        
+        # 2. Atualizar modelo com o dado que "acabou de acontecer" (Real)
+        # O dado real atual é series_values[i]
+        obs = series_values[i:i+step_size]
+        model_wrapper.update(obs)
+
     return np.array(preds)
 
+def train_pipeline(args):
+    # 1. Carregar
+    ts = load_and_transform_data(args.csv_path, args.target)
+    
+    # 2. Split
+    train, val, test = split_series_by_date(ts, args.train_end, args.val_end)
+    logger.info(f"Train: {len(train)} | Val: {len(val)} | Test: {len(test)}")
 
-def train_and_evaluate_arima(
-    csv_path: str,
-    target: str,
-    order: tuple[int, int, int],
-    model_dir: str,
-    version: str,
-    train_end: str = "2017-12-31",
-    val_end:   str = "2018-12-31",
-    rolling:   bool = True,
-    step_size: int = 1
-) -> dict:
-    """
-    Treina um ARIMA em `train`, avalia em train/val/test e salva artefatos.
-    Retorna dict com chaves: model, metrics, predictions.
-    """
-    logger.info(f"Loading series for target {target}")
-    ts = load_series(csv_path, target)
+    if len(train) < 100:
+        raise ValueError("Dataset de treino muito pequeno para ARIMA/GARCH.")
 
-    # valida cortes de data
-    min_date = ts.index.min()
-    max_date = ts.index.max()
-    if pd.to_datetime(train_end) < min_date or pd.to_datetime(val_end) > max_date:
-        raise ValueError(f"Cutoff dates must lie within series range [{min_date}, {max_date}]")
+    # 3. Setup Modelo
+    # Se d=1 foi passado, alertamos. Para LogReturns, d=0 é o correto.
+    p, d, q = args.order
+    if d > 0:
+        logger.warning("ALERTA: 'd' > 0 detectado. Para retornos, use d=0. Forçando d=0.")
+        d = 0
+    
+    arima_order = (p, d, q)
+    model = ArimaModel(arima_order=arima_order, use_garch=args.use_garch)
 
-    train_series, val_series, test_series = split_series(ts, train_end, val_end)
-    logger.info(f"Split sizes → train: {len(train_series)}, val: {len(val_series)}, test: {len(test_series)}")
-    if train_series.empty or val_series.empty or test_series.empty:
-        raise ValueError("One of train/val/test series is empty after split.")
+    # 4. Treino Inicial
+    logger.info(f"Treinando ARIMA{arima_order}...")
+    model.fit(train)
+    logger.info("Treino inicial concluído.")
 
-    # ajusta ARIMA no conjunto de treino
-    arima = ArimaModel(order)
-    arima.fit(train_series)
+    # 5. Previsões (Rolling)
+    logger.info("Iniciando Validação Rolling...")
+    val_pred = rolling_forecast_optimized(model, val, step_size=1)
+    
+    logger.info("Iniciando Teste Rolling...")
+    test_pred = rolling_forecast_optimized(model, test, step_size=1)
+    
+    # In-sample (apenas para referência)
+    train_pred = model.arima_result.fittedvalues
 
-    # previsões in-sample (fittedvalues)
-    train_pred = arima.model_fit.fittedvalues
-
-    # previsões out-of-sample
-    if rolling:
-        model_fit_copy = arima.model_fit
-        val_pred  = rolling_forecast(model_fit_copy, val_series,  step_size)
-        test_pred = rolling_forecast(model_fit_copy, test_series, step_size)
-    else:
-        val_pred  = arima.model_fit.forecast(steps=len(val_series))
-        test_pred = arima.model_fit.forecast(steps=len(test_series))
-
-    # cálculo de métricas
+    # 6. Métricas
     metrics = {
-        'train': evaluate_model(train_series.values,    train_pred),
-        'val':   evaluate_model(val_series.values,      val_pred),
-        'test':  evaluate_model(test_series.values,     test_pred)
+        'train': evaluate_model(train.values, train_pred),
+        'val':   evaluate_model(val.values, val_pred),
+        'test':  evaluate_model(test.values, test_pred)
     }
 
-    # log sem sobrescrever variáveis de séries
-    for phase, phase_metrics in metrics.items():
-        logger.info(f"\n{phase.upper()} metrics:")
-        for metric_name, metric_value in phase_metrics.items():
-            logger.info(f"  {metric_name}: {metric_value:.4f}")
+    # Exibir
+    print("\n=== RESULTADOS FINAIS ===")
+    print(json.dumps(metrics, indent=2))
 
-    # salvar artefatos
-    out_dir = Path(model_dir)
+    # 7. Salvar (Opcional - usando joblib para o objeto e numpy para arrays)
+    out_dir = Path(args.model_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    prefix = f"{target}_arima_v{version}"
-
-    joblib.dump(arima,    out_dir / f"{prefix}.pkl",           compress=('gzip', 3))
-    with open(out_dir / f"{prefix}_metrics.json", 'w', encoding='utf-8') as f:
-        json.dump(metrics, f, indent=2, ensure_ascii=False)
-    np.save(out_dir / f"{prefix}_y_train.npy",      train_series.values)
-    np.save(out_dir / f"{prefix}_y_train_pred.npy", train_pred)
-    np.save(out_dir / f"{prefix}_y_val.npy",        val_series.values)
-    np.save(out_dir / f"{prefix}_y_val_pred.npy",   val_pred)
-    np.save(out_dir / f"{prefix}_y_test.npy",       test_series.values)
-    np.save(out_dir / f"{prefix}_y_test_pred.npy",  test_pred)
-
-    logger.info(f"Artifacts saved under {out_dir}")
-    return {
-        'model': arima,
-        'metrics': metrics,
-        'predictions': {
-            'train': train_pred,
-            'val':   val_pred,
-            'test':  test_pred
-        }
-    }
-
+    joblib.dump(model, out_dir / f"{args.target}_hybrid_model.pkl")
+    # Salvar predições pode ser feito com np.save conforme seu script original
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Train & evaluate ARIMA with rolling forecast")
-    parser.add_argument('--csv_path',  type=str, required=True)
-    parser.add_argument('--target',    type=str, required=True)
-    parser.add_argument('--order',     type=str, default="2,1,1",
-                        help="ARIMA order p,d,q as comma-separated")
-    parser.add_argument('--model_dir', type=str, required=True)
-    parser.add_argument('--version',   type=str, default="1.0")
-    parser.add_argument('--train_end', type=str, default="2017-12-31")
-    parser.add_argument('--val_end',   type=str, default="2018-12-31")
-    parser.add_argument('--rolling',   action='store_true')
-    parser.add_argument('--step_size', type=int, default=1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--csv_path', required=True)
+    parser.add_argument('--target', required=True, help="Nome da coluna de PREÇO (Close)")
+    parser.add_argument('--order', type=str, default="2,0,2", help="p,d,q")
+    parser.add_argument('--train_end', type=str, required=True, help="Ex: 2023-01-01 12:00")
+    parser.add_argument('--val_end', type=str, required=True)
+    parser.add_argument('--model_dir', type=str, default="./artifacts")
+    parser.add_argument('--use_garch', action='store_true', help="Ativar GARCH nos resíduos")
+    
     args = parser.parse_args()
-    order = tuple(map(int, args.order.split(',')))
-
-    train_and_evaluate_arima(
-        csv_path=args.csv_path,
-        target=args.target,
-        order=order,
-        model_dir=args.model_dir,
-        version=args.version,
-        train_end=args.train_end,
-        val_end=args.val_end,
-        rolling=args.rolling,
-        step_size=args.step_size
-    )
+    args.order = tuple(map(int, args.order.split(',')))
+    
+    train_pipeline(args)
