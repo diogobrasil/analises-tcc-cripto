@@ -10,9 +10,10 @@ import joblib
 # Importações absolutas
 from classes.neural_networks.training.train_linear_regression import (
     load_data,
-    create_window_data,
+    create_window_data,  
     split_data_time_anchored
 )
+from classes.preprocessing.technical_features import TechnicalFeatures
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -35,7 +36,8 @@ class ResultsVisualizer:
         train_cfg = config['training']
         
         # 1. Carregar Modelo e Scalers
-        model, scaler_X, scaler_y = self._load_artifacts(artifacts)
+        # Nota: scaler_X não existe mais separadamente, está dentro do Pipeline do modelo
+        model, scaler_y = self._load_artifacts(artifacts)
         
         # 2. Recriar Dados de Teste
         # Nota: X_test e y_test virão no formato usado no treino (ex: Log Returns)
@@ -43,8 +45,8 @@ class ResultsVisualizer:
         
         # 3. Predizer (na escala normalizada)
         logging.info("Gerando predições...")
-        X_test_n = scaler_X.transform(X_test)
-        y_pred_n = model.predict(X_test_n)
+        # O modelo é um Pipeline (StandardScaler -> Ridge), então ele já normaliza o X internamente
+        y_pred_n = model.predict(X_test)
         
         # 4. Desnormalizar para a escala real (Log Returns Brutos)
         y_pred_raw = scaler_y.inverse_transform(y_pred_n.reshape(-1, 1)).ravel()
@@ -81,9 +83,15 @@ class ResultsVisualizer:
         # Carrega o DF completo para podermos buscar os preços originais depois
         df = load_data(data_cfg['filepath'], data_cfg['date_col'], data_cfg.get('timezone', 'UTC'))
         
+        # 1.5 Feature Engineering (TechnicalFeatures)
+        logging.info("Applying Technical Features...")
+        tf = TechnicalFeatures(df)
+        df_enriched = tf.get_features()
+
         # Cria janelas (aqui o target vira retorno se use_returns=True)
-        X, y, timestamps = create_window_data(
-            df, data_cfg['target_col'], train_cfg['window_size'],
+        # create_window_data agora retorna 4 valores
+        X, y, timestamps, _ = create_window_data(
+            df_enriched, data_cfg['target_col'], train_cfg['window_size'],
             filter_cross_day=train_cfg.get('filter_cross_day', True),
             use_returns=train_cfg.get('use_returns', False)
         )
@@ -125,14 +133,12 @@ class ResultsVisualizer:
         return price_next_real, price_next_pred
 
     def _load_artifacts(self, artifacts):
-        # ... (Mantido igual)
         model_path = self.base_dir / Path(artifacts['model']).name
-        scaler_X_path = self.base_dir / Path(artifacts['scaler_X']).name
         scaler_y_path = self.base_dir / Path(artifacts['scaler_y']).name
 
+        # scaler_X não é mais carregado pois está no pipeline do modelo
         return (
             joblib.load(model_path),
-            joblib.load(scaler_X_path),
             joblib.load(scaler_y_path)
         )
 
@@ -147,9 +153,6 @@ class ResultsVisualizer:
         
         # Linha pontilhada para previsão
         plt.plot(df_plot.index, df_plot['Previsto'], label='Previsto (One-Step)', color='red', linestyle='--', alpha=0.8)
-        
-        # Indica visualmente se acertou a direção (Opcional, mas legal)
-        # Se quiser poluir menos o gráfico, remova essa lógica
         
         plt.title(f'Resultado do Modelo - {title_suffix}')
         plt.xlabel('Data/Hora')
