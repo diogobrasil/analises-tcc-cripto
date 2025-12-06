@@ -11,9 +11,12 @@ import numpy as np
 import joblib
 
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
-from classes.neural_networks.architectures.linear_regression import LinearRegression
+# Import TechnicalFeatures
+from classes.preprocessing.technical_features import TechnicalFeatures
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -131,11 +134,37 @@ def create_window_data(
     
     # 3. Criação dos Lags (A Lógica Original que funcionava)
     # Gera de lag_(window-1) até lag_0 (que é o candle atual)
+    # AGORA INCLUI TODAS AS FEATURES DO DF
+    
+    # Identifica colunas de feature (tudo menos o target se quisermos, mas aqui vamos focar no target lags + features extras)
+    # Por simplicidade e robustez com TechnicalFeatures, vamos usar TODAS as colunas numéricas como input
+    feature_cols = [c for c in df_proc.columns if np.issubdtype(df_proc[c].dtype, np.number)]
+    
+    # Se quisermos apenas lags do target, manteríamos a lógica antiga.
+    # Mas o pedido é integrar Feature Engineering, então as features geradas (RSI, SMA, etc) devem entrar no X.
+    # A lógica de janela deslizante para MUITAS features pode explodir a dimensionalidade se fizermos lags de tudo.
+    # VAMOS MANTER A LÓGICA DE LAGS APENAS PRO TARGET POR ENQUANTO, E USAR AS FEATURES TÉCNICAS DO TEMPO T.
+    # OU SEJA: Input = [Lags do Target] + [Features Técnicas Atuais]
+    
+    # Lags do Target
     lags = {}
     for lag in range(window_size - 1, -1, -1):
         lags[f'lag_{lag}'] = df_proc[target].shift(lag)
     
-    df_features = pd.DataFrame(lags, index=df_proc.index)
+    df_lags = pd.DataFrame(lags, index=df_proc.index)
+    
+    # Features Técnicas (sem lag, ou seja, valor no tempo t)
+    # Removemos o target das features técnicas para não vazar (embora lag_0 seja o target em t)
+    # Se lag_0 está incluso, o modelo aprende a identidade se usarmos target em t.
+    # Normalmente, queremos prever t+1 usando informações até t.
+    # Então lag_0 é o valor em t. As features técnicas em t também são conhecidas em t.
+    # O target y é t+1.
+    
+    # Juntamos Lags + Features Técnicas
+    # Features técnicas já estão no df_proc. Vamos pegar todas exceto o target (que já está representado nos lags)
+    # Mas espere, TechnicalFeatures gera colunas novas.
+    extra_features = [c for c in feature_cols if c != target]
+    df_features = pd.concat([df_lags, df_proc[extra_features]], axis=1)
     
     # O alvo é o próximo passo (t+1)
     df_features['y_next'] = df_proc[target].shift(-1)
@@ -145,7 +174,7 @@ def create_window_data(
     # Shiftamos a data para saber de qual dia veio o dado mais antigo da janela
     df_features['date_oldest_lag'] = pd.Series(df_features.index.date, index=df_features.index).shift(window_size - 1)
 
-    # Limpeza de NaNs gerados pelo shift da janela
+    # Limpeza de NaNs gerados pelo shift da janela e features
     df_clean = df_features.dropna().copy()
 
     # 5. Filtro Cross-Day (Overnight Gap)
@@ -159,12 +188,16 @@ def create_window_data(
             logging.warning(f"Cross-day filter removed {removed} windows.")
 
     # 6. Retorno Final
-    feature_cols = [f'lag_{lag}' for lag in range(window_size - 1, -1, -1)]
-    X = df_clean[feature_cols].values
+    # X deve conter lags + extra features
+    # Precisamos garantir a ordem das colunas para consistência
+    cols_to_drop = ['y_next', 'date_current', 'date_oldest_lag']
+    final_feature_cols = [c for c in df_clean.columns if c not in cols_to_drop]
+    
+    X = df_clean[final_feature_cols].values
     y = df_clean['y_next'].values
     timestamps = df_clean.index
 
-    return X, y, timestamps
+    return X, y, timestamps, final_feature_cols
 
 
 # -------------------------
@@ -232,29 +265,21 @@ def split_data_time_anchored(
 
 
 # -------------------------
-# 4. Normalização (2D / nota para 3D)
+# 4. Normalização (Target Only)
 # -------------------------
-def normalize_data(
-    X_train: np.ndarray,
-    X_test: np.ndarray,
+def normalize_target(
     y_train: np.ndarray,
     y_test: np.ndarray
 ):
     """
-    Normaliza com MinMaxScaler. Suporta X 2D (n_samples, features).
-    Se futuramente X for 3D para LSTM, adapte para escalonar por feature via reshape.
+    Normaliza apenas o target (y). O X será normalizado pelo Pipeline do Sklearn.
     """
-    scaler_X = StandardScaler()
     scaler_y = StandardScaler()
-
-    # assumimos X 2D para Regressão Linear simples
-    X_train_n = scaler_X.fit_transform(X_train)
-    X_test_n = scaler_X.transform(X_test)
 
     y_train_n = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
     y_test_n = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
 
-    return X_train_n, X_test_n, y_train_n, y_test_n, scaler_X, scaler_y
+    return y_train_n, y_test_n, scaler_y
 
 
 # -------------------------
@@ -276,12 +301,17 @@ def run_training_pipeline(config: dict):
     if target not in df.columns:
         raise ValueError(f"Target column '{target}' not found. Available columns: {list(df.columns)}")
 
+    # 1.5 Feature Engineering (TechnicalFeatures)
+    logging.info("Applying Technical Features...")
+    tf = TechnicalFeatures(df)
+    df_enriched = tf.get_features()
+
     # 2. Windowing
-    X, y, timestamps = create_window_data(
-        df,
+    X, y, timestamps, feature_names = create_window_data(
+        df_enriched,
         target,
         train_cfg['window_size'],
-            use_returns=train_cfg.get('use_returns', False),
+        use_returns=train_cfg.get('use_returns', False),
         filter_cross_day=train_cfg.get('filter_cross_day', True)
     )
 
@@ -292,19 +322,22 @@ def run_training_pipeline(config: dict):
         embargo_str=train_cfg.get('embargo', "0s")
     )
 
-    # 4. Normalize
-    X_train_n, X_test_n, y_train_n, y_test_n, scaler_X, scaler_y = normalize_data(
-        X_train, X_test, y_train, y_test
-    )
+    # 4. Normalize Target (X is handled by pipeline)
+    y_train_n, y_test_n, scaler_y = normalize_target(y_train, y_test)
 
-    # 5. Train
-    logging.info("Training Linear Regression...")
-    model = LinearRegression()
-    # LinearRegression.normal_equation deve aceitar X 2D
-    theta = model.normal_equation(X_train_n, y_train_n)
+    # 5. Train (Pipeline: Scaler -> Ridge)
+    logging.info("Training Ridge Regression Pipeline...")
+    
+    # Pipeline do Scikit-Learn
+    model = make_pipeline(
+        StandardScaler(),
+        Ridge(alpha=1.0)
+    )
+    
+    model.fit(X_train, y_train_n)
 
     # 6. Evaluate
-    y_pred_n = model.predict(X_test_n)
+    y_pred_n = model.predict(X_test)
     y_pred = scaler_y.inverse_transform(y_pred_n.reshape(-1, 1)).ravel()
 
     metrics = {
@@ -321,7 +354,6 @@ def run_training_pipeline(config: dict):
 
     # caminhos finais
     model_path = save_path / f"{target}_model_{ver}.pkl"
-    scalerX_path = save_path / f"{target}_scalerX_{ver}.pkl"
     scalerY_path = save_path / f"{target}_scalerY_{ver}.pkl"
     metadata_path = save_path / f"{target}_metadata_{ver}.json"
 
@@ -330,11 +362,6 @@ def run_training_pipeline(config: dict):
         joblib.dump(model, tmp_m.name)
         tmp_m.flush()
     Path(tmp_m.name).replace(model_path)
-
-    with tempfile.NamedTemporaryFile(delete=False, dir=save_path) as tmp_sx:
-        joblib.dump(scaler_X, tmp_sx.name)
-        tmp_sx.flush()
-    Path(tmp_sx.name).replace(scalerX_path)
 
     with tempfile.NamedTemporaryFile(delete=False, dir=save_path) as tmp_sy:
         joblib.dump(scaler_y, tmp_sy.name)
@@ -349,13 +376,12 @@ def run_training_pipeline(config: dict):
             "train_samples": len(X_train),
             "test_samples": len(X_test),
             "features_shape": X_train.shape,
-            "input_columns": [f'lag_{i}' for i in range(train_cfg['window_size'] - 1, -1, -1)],
+            "feature_names": feature_names,
             "train_end_time": str(train_end_time),
             "timezone": str(df.index.tz)
         },
         "artifact_paths": {
             "model": str(model_path),
-            "scaler_X": str(scalerX_path),
             "scaler_y": str(scalerY_path)
         }
     }

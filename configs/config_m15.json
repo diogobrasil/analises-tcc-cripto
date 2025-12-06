@@ -1,6 +1,6 @@
 {
     "data": {
-        "filepath": "main/datasets/b3_dados/processed/ABEV3_M15.csv", 
+        "filepath": "main/datasets/b3_dados/processed/PETR4_M15.csv",
         "date_col": "Date",
         "target_col": "close",
         "timezone": "America/Sao_Paulo"
@@ -10,10 +10,20 @@
         "test_split_ratio": 0.2,
         "embargo": "1h",
         "filter_cross_day": true,
-        "use_returns": true
+        "use_returns": true,
+        "use_technical_features": true,
+        "xgboost_params": {
+            "n_estimators": 1000,
+            "max_depth": 6,
+            "learning_rate": 0.01,
+            "subsample": 0.7,
+            "colsample_bytree": 0.7,
+            "objective": "reg:squarederror",
+            "n_jobs": -1
+        }
     },
     "output": {
-        "model_dir": "main/saved_models/linear_regression_M15",
-        "version_tag": "intraday_returns_01"
+        "model_dir": "main/saved_models/xgboost_M15",
+        "version_tag": "petr4_xgb_v1"
     }
 }
