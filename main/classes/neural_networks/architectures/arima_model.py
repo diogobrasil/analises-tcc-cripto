@@ -14,44 +14,56 @@ class ArimaModel:
         self.arima_result = None
         self.garch_result = None
 
-    # --- ALTERAÇÃO AQUI: Adicionado argumento 'exog' ---
     def fit(self, y_train, exog_train=None):
+        """
+        Ajusta o ARIMA (com ou sem Exog) e o GARCH nos resíduos.
+        """
         try:
-            # Passamos exog para o ARIMA
-            model_arima = ARIMA(y_train, exog=exog_train, order=self.arima_order)
-            self.arima_result = model_arima.fit()
+            # ARIMA aceita 'exog' como argumento opcional
+            self.model_arima = ARIMA(y_train, exog=exog_train, order=self.arima_order)
+            self.arima_result = self.model_arima.fit()
         except Exception as e:
             raise ValueError(f"Erro ao ajustar ARIMA: {e}")
 
-        # GARCH continua igual (ele opera só nos resíduos)
+        # GARCH opera nos resíduos do ARIMA (para modelar o risco/volatilidade)
         if self.use_garch:
             try:
                 residuals = self.arima_result.resid
-                model_garch = arch_model(residuals, vol='Garch', p=self.garch_order[0], q=self.garch_order[1], dist='Normal')
-                self.garch_result = model_garch.fit(disp='off', show_warning=False)
-            except Exception:
+                # Escalar resíduos (x100) ajuda na convergência do GARCH em dados pequenos
+                self.model_garch = arch_model(residuals * 100, vol='Garch', 
+                                              p=self.garch_order[0], q=self.garch_order[1], 
+                                              dist='Normal')
+                self.garch_result = self.model_garch.fit(disp='off', show_warning=False)
+            except Exception as e:
+                print(f"Aviso: GARCH falhou ({e}). Seguindo sem ele.")
                 self.garch_result = None
         return self
 
-    # --- ALTERAÇÃO AQUI: predict precisa receber o exog futuro ---
     def predict_next(self, steps=1, exog_future=None):
+        """
+        Realiza a previsão. Se houver exog, ele é obrigatório aqui.
+        """
         if self.arima_result is None:
             raise ValueError("Modelo não treinado.")
 
-        # Passamos exog para o forecast
+        # Previsão da Média (ARIMAX)
+        # exog_future deve ter tamanho igual a 'steps'
         forecast_arima = self.arima_result.forecast(steps=steps, exog=exog_future)
-        mu = forecast_arima.iloc[0] if isinstance(forecast_arima, pd.Series) else forecast_arima[0]
+        
+        # Tratamento seguro para diferentes tipos de retorno (Series, Array, Escalar)
+        if isinstance(forecast_arima, pd.Series):
+            mu = forecast_arima.values
+        else:
+            mu = np.array(forecast_arima)
 
-        sigma = 0.0
+        # Previsão da Volatilidade (GARCH)
+        sigma = np.zeros(steps)
         if self.garch_result is not None:
             forecast_garch = self.garch_result.forecast(horizon=steps)
-            var_pred = forecast_garch.variance.iloc[-1, 0]
-            sigma = np.sqrt(var_pred)
+            var_pred = forecast_garch.variance.iloc[-1].values
+            sigma = np.sqrt(var_pred) / 100 # Desfazendo a escala
 
+        # Se pediu apenas 1 passo, retorna escalar. Se mais, retorna array.
+        if steps == 1:
+            return mu[0], sigma[0]
         return mu, sigma
-
-    def update(self, new_observations, new_exog=None):
-        # Update com exog é complexo no statsmodels via append, 
-        # para simplificar o teste, vamos ignorar o update online por enquanto 
-        # ou apenas re-treinar se necessário.
-        pass
