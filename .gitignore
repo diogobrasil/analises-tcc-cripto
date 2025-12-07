@@ -5,6 +5,7 @@ __pycache__/
 *$py.class
 
 /main/saved_models
+/models_abev3
 
 # Ignorar arquivos de log
 *.log
